@@ -1,0 +1,35 @@
+# Core Framework
+fastapi
+uvicorn[standard]
+python-dotenv
+
+# Data Processing - Compatible with Python 3.14
+polars
+numpy
+duckdb
+pyarrow
+pandas
+
+# Order Flow & Technical Analysis
+# numba  # Skip for now - not critical for MVP, will add later
+pandas-ta  # Will use latest available version
+
+# Databento
+databento
+
+# LLM & Agents
+langgraph
+langchain
+langchain-openai
+langchain-anthropic
+
+# WebSocket & Real-time
+websockets
+redis
+
+# Utilities
+pydantic
+pydantic-settings
+
+# AWS SDK (for S3 storage in production)
+boto3

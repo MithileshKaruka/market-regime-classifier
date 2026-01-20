@@ -1,0 +1,155 @@
+.orderflow-metrics {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.orderflow-metrics h3 {
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: #e8e9ed;
+}
+
+.section-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: #6b7280;
+  letter-spacing: 0.5px;
+  margin-bottom: 0.75rem;
+}
+
+/* DOM Imbalance Section */
+.dom-section {
+  background-color: #1a2138;
+  border: 1px solid #2d3748;
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.dom-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.dom-item {
+  display: grid;
+  grid-template-columns: 40px 1fr 50px;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem;
+  border-radius: 4px;
+  border: 2px solid transparent;
+  transition: all 0.2s;
+}
+
+.dom-item.selected {
+  background-color: rgba(59, 130, 246, 0.1);
+}
+
+.dom-tf {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #9ca3af;
+}
+
+.dom-bar {
+  height: 8px;
+  border-radius: 4px;
+  position: relative;
+}
+
+.dom-indicator {
+  position: absolute;
+  top: -4px;
+  width: 4px;
+  height: 16px;
+  background-color: #ffffff;
+  border-radius: 2px;
+  transform: translateX(-50%);
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.5);
+}
+
+.dom-value {
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.dom-legend {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 0.75rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid #2d3748;
+  font-size: 0.625rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* VWAP Section */
+.vwap-section {
+  background-color: #1a2138;
+  border: 1px solid #2d3748;
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.vwap-display {
+  border-left: 4px solid;
+  padding-left: 1rem;
+}
+
+.vwap-price {
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: #e8e9ed;
+  font-variant-numeric: tabular-nums;
+}
+
+.vwap-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
+.vwap-position {
+  font-size: 1rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.vwap-direction {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.current-price {
+  margin-top: 0.5rem;
+  font-size: 0.875rem;
+  color: #9ca3af;
+}
+
+.current-price span {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.loading {
+  color: #6b7280;
+  font-size: 0.875rem;
+  padding: 1rem;
+  text-align: center;
+}
+
+@media (max-width: 768px) {
+  .dom-item {
+    grid-template-columns: 35px 1fr 45px;
+  }
+}

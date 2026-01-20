@@ -1,0 +1,688 @@
+"""Orderflow signals API endpoints"""
+from fastapi import APIRouter, Query, Path, HTTPException
+from typing import List, Optional
+from pydantic import BaseModel
+from datetime import datetime
+import polars as pl
+from app.data.storage import DuckDBStorage
+from app.features.orderflow_signals import OrderflowSignalDetector, SignalType, SignalDirection
+from app.features.orderflow_metrics import OrderflowMetricsCalculator, BiasStrength
+from app.features.agent_bias import AgentBiasCalculator, AgentMode
+from app.agent.graph import run_agent, TradeAction, PositionState
+
+router = APIRouter()
+
+
+class OrderflowSignalResponse(BaseModel):
+    """Single orderflow signal"""
+    timestamp: int  # Unix timestamp
+    signal_type: str  # Absorption, LSF, OB Imb
+    direction: str  # BULLISH or BEARISH
+    price: float
+    strength: float  # 0.0 to 1.0
+    details: str
+
+
+class OrderflowSignalsResponse(BaseModel):
+    """Response containing all orderflow signals"""
+    timeframe: str
+    signals: List[OrderflowSignalResponse]
+    total_count: int
+
+
+class DOMSummary(BaseModel):
+    """DOM imbalance summary for a single timeframe"""
+    timeframe: str
+    dom_imbalance: float  # 0 to 1 (0.5 = balanced)
+    direction: str  # BULLISH, BEARISH, NEUTRAL
+    timestamp: datetime
+
+
+class VWAPStatus(BaseModel):
+    """Daily VWAP status"""
+    vwap: float
+    current_price: float
+    position: str  # ABOVE or BELOW
+    distance_pct: float  # % distance from VWAP
+
+
+class SimplifiedMetrics(BaseModel):
+    """Simplified metrics: DOM by timeframe + VWAP"""
+    dom_by_timeframe: List[DOMSummary]
+    daily_vwap: VWAPStatus
+    timestamp: datetime
+
+
+# Advanced Orderflow Metrics Response Models
+
+class RVOLResponse(BaseModel):
+    """Relative Volume metrics"""
+    rvol: float  # Current volume / 20-period MA
+    rvol_20ma: float  # 20-period volume moving average
+    current_volume: int
+    poc_price: float  # Point of Control price
+    poc_distance_pct: float  # % distance from POC
+    price_vs_poc: str  # ABOVE, BELOW, AT
+    bias: str  # STRONG_BULLISH, BULLISH, NEUTRAL, BEARISH, STRONG_BEARISH
+    conviction: str  # HIGH, MEDIUM, LOW
+    details: str
+
+
+class VPINResponse(BaseModel):
+    """VPIN (Volume-Synchronized Probability of Informed Trading)"""
+    vpin: float  # 0.0 to 1.0
+    vpin_threshold: float
+    is_elevated: bool
+    toxicity_level: str  # LOW, MODERATE, HIGH, EXTREME
+    recent_trend: str  # RISING, STABLE, FALLING
+    details: str
+
+
+class LDRResponse(BaseModel):
+    """Liquidity Depth Ratio"""
+    ldr: float  # Bid depth / Ask depth ratio
+    total_bid_depth: float
+    total_ask_depth: float
+    bid_concentration: float  # 0-1, how tight bids are near BBO
+    ask_concentration: float  # 0-1, how tight asks are near BBO
+    support_wall: bool  # Strong bid wall detected
+    resistance_wall: bool  # Strong ask wall detected
+    bias: str
+    details: str
+
+
+class AdvancedMetricsResponse(BaseModel):
+    """Complete advanced orderflow metrics dashboard"""
+    timestamp: int
+    timeframe: str
+    rvol: Optional[RVOLResponse] = None
+    vpin: Optional[VPINResponse] = None
+    ldr: Optional[LDRResponse] = None
+    overall_bias: str  # Combined bias from all metrics
+    alert_level: str  # NORMAL, ELEVATED, HIGH_ALERT
+
+
+@router.get("/signals/{timeframe}", response_model=OrderflowSignalsResponse)
+async def get_orderflow_signals(
+    timeframe: str = Path(..., pattern="^(5M|15M|1H|4H|1D)$"),
+    limit: int = Query(500, ge=100, le=5000, description="Number of bars to analyze"),
+    detect_absorption: bool = Query(True, description="Detect absorption signals"),
+    detect_lsf: bool = Query(True, description="Detect liquidity sweep fade signals"),
+    detect_obi: bool = Query(True, description="Detect order book imbalance signals"),
+):
+    """
+    Get orderflow signals for a timeframe
+
+    Detects three types of signals:
+    1. **Absorption**: Large volume hitting a level but price stays stable
+    2. **LSF** (Liquidity Sweep Fade): Stop run followed by snap-back
+    3. **OB Imb** (Order Book Imbalance): Strong weighted imbalance in order book
+    """
+    with DuckDBStorage() as storage:
+        # Get OHLCV + order flow data
+        # Only fetch bars that have real DOM data (dom_imbalance != 0.5)
+        # Order by ASC to get chronological order
+        df = storage.conn.execute(f"""
+            SELECT
+                timestamp,
+                open,
+                high,
+                low,
+                close,
+                volume,
+                dom_imbalance,
+                cvd as instant_delta
+            FROM order_book
+            WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
+            AND dom_imbalance != 0.5
+            ORDER BY timestamp ASC
+            LIMIT {limit}
+        """).pl()
+
+        if len(df) == 0:
+            # Return empty signals if no real orderflow data
+            return OrderflowSignalsResponse(
+                timeframe=timeframe,
+                signals=[],
+                total_count=0,
+            )
+
+        # Data is already in chronological order
+
+        # Add depth columns (use dom_imbalance to estimate depth ratio)
+        # total_bid_depth and total_ask_depth approximated from dom_imbalance
+        # If DOM = 0.6, bid_depth ~= 1.5 * ask_depth, so ratio = 3:2
+        df = df.with_columns([
+            (pl.col("volume") * pl.col("dom_imbalance")).alias("total_bid_depth"),
+            (pl.col("volume") * (1 - pl.col("dom_imbalance"))).alias("total_ask_depth"),
+        ])
+
+        # Initialize detector with looser thresholds for real-world data
+        detector = OrderflowSignalDetector(
+            absorption_volume_mult=1.3,
+            absorption_price_tol=0.001,
+            absorption_dom_threshold=0.52,
+            lsf_spike_mult=1.5,
+            lsf_snapback_pct=0.002,
+            obi_threshold=1.15,
+            lookback_bars=20,
+        )
+
+        # Detect signals
+        signals = detector.detect_all_signals(
+            df,
+            detect_absorption=detect_absorption,
+            detect_lsf=detect_lsf,
+            detect_obi=detect_obi,
+        )
+
+        # Convert to response format
+        signal_responses = [
+            OrderflowSignalResponse(
+                timestamp=sig.timestamp,
+                signal_type=sig.signal_type.value,
+                direction=sig.direction.value,
+                price=sig.price,
+                strength=sig.strength,
+                details=sig.details,
+            )
+            for sig in signals
+        ]
+
+        return OrderflowSignalsResponse(
+            timeframe=timeframe,
+            signals=signal_responses,
+            total_count=len(signal_responses),
+        )
+
+
+@router.get("/metrics", response_model=SimplifiedMetrics)
+async def get_simplified_metrics():
+    """
+    Get simplified orderflow metrics
+
+    Returns:
+    - DOM imbalance for each timeframe (5M, 15M, 1H, 4H, 1D)
+    - Daily VWAP level with current price position (above/below)
+    """
+    with DuckDBStorage() as storage:
+        timeframes = ['5M', '15M', '1H', '4H', '1D']
+        dom_summaries = []
+
+        for tf in timeframes:
+            # Get latest DOM imbalance for each timeframe
+            df = storage.conn.execute(f"""
+                SELECT timestamp, dom_imbalance
+                FROM order_book
+                WHERE symbol = 'MNQ' AND timeframe = '{tf}'
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """).pl()
+
+            if len(df) > 0:
+                row = df.row(0, named=True)
+                dom = row["dom_imbalance"]
+
+                # Classify direction
+                if dom > 0.55:
+                    direction = "BULLISH"
+                elif dom < 0.45:
+                    direction = "BEARISH"
+                else:
+                    direction = "NEUTRAL"
+
+                dom_summaries.append(DOMSummary(
+                    timeframe=tf,
+                    dom_imbalance=dom,
+                    direction=direction,
+                    timestamp=row["timestamp"],
+                ))
+
+        # Get daily VWAP
+        vwap_df = storage.conn.execute("""
+            SELECT vwap, close as current_price
+            FROM order_book
+            WHERE symbol = 'MNQ' AND timeframe = '1D'
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """).pl()
+
+        if len(vwap_df) == 0:
+            # Fall back to 1H data if no daily
+            vwap_df = storage.conn.execute("""
+                SELECT vwap, close as current_price
+                FROM order_book
+                WHERE symbol = 'MNQ' AND timeframe = '1H'
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """).pl()
+
+        if len(vwap_df) > 0:
+            vwap_row = vwap_df.row(0, named=True)
+            vwap = vwap_row["vwap"]
+            price = vwap_row["current_price"]
+
+            if vwap and vwap > 0:
+                position = "ABOVE" if price > vwap else "BELOW"
+                distance_pct = abs(price - vwap) / vwap * 100
+            else:
+                vwap = price
+                position = "AT"
+                distance_pct = 0.0
+
+            vwap_status = VWAPStatus(
+                vwap=vwap,
+                current_price=price,
+                position=position,
+                distance_pct=distance_pct,
+            )
+        else:
+            # No data available
+            vwap_status = VWAPStatus(
+                vwap=0.0,
+                current_price=0.0,
+                position="UNKNOWN",
+                distance_pct=0.0,
+            )
+
+        return SimplifiedMetrics(
+            dom_by_timeframe=dom_summaries,
+            daily_vwap=vwap_status,
+            timestamp=datetime.utcnow(),
+        )
+
+
+@router.get("/advanced/{timeframe}", response_model=AdvancedMetricsResponse)
+async def get_advanced_metrics(
+    timeframe: str = Path(..., pattern="^(5M|15M|1H|4H|1D)$"),
+    limit: int = Query(200, ge=50, le=1000, description="Number of bars for calculation"),
+):
+    """
+    Get advanced orderflow metrics for a timeframe
+
+    Returns:
+    - **RVOL**: Relative Volume vs 20-period MA with POC (Point of Control) context
+    - **VPIN**: Volume-Synchronized Probability of Informed Trading (institutional flow detector)
+    - **LDR**: Liquidity Depth Ratio from order book (support/resistance wall detection)
+    - **Overall Bias**: Combined signal from all metrics
+    - **Alert Level**: NORMAL, ELEVATED, or HIGH_ALERT
+
+    Interpretation:
+    - RVOL > 1.5 with price above POC = strong bullish conviction
+    - VPIN > 0.7 = high probability of informed (institutional) trading
+    - LDR > 2.5 = support wall (bullish even if price falling)
+    - LDR < 0.4 = resistance wall (bearish even if price rising)
+    """
+    with DuckDBStorage() as storage:
+        # Get OHLCV + orderflow data
+        df = storage.conn.execute(f"""
+            SELECT
+                timestamp,
+                open,
+                high,
+                low,
+                close,
+                volume,
+                dom_imbalance,
+                cvd as instant_delta
+            FROM order_book
+            WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
+            ORDER BY timestamp ASC
+            LIMIT {limit}
+        """).pl()
+
+        if len(df) == 0:
+            raise HTTPException(status_code=404, detail=f"No data for {timeframe}")
+
+        # Add estimated depth from DOM imbalance
+        df = df.with_columns([
+            (pl.col("volume") * pl.col("dom_imbalance")).alias("total_bid_depth"),
+            (pl.col("volume") * (1 - pl.col("dom_imbalance"))).alias("total_ask_depth"),
+        ])
+
+        # Calculate advanced metrics
+        calculator = OrderflowMetricsCalculator(
+            rvol_lookback=20,
+            rvol_high_threshold=1.5,
+            vpin_num_buckets=50,
+            vpin_alert_threshold=0.7,
+            ldr_wall_threshold=2.5,
+            poc_lookback=100,
+        )
+
+        dashboard = calculator.calculate_all_metrics(df)
+
+        # Convert to response
+        rvol_response = None
+        if dashboard.rvol:
+            rvol_response = RVOLResponse(
+                rvol=dashboard.rvol.rvol,
+                rvol_20ma=dashboard.rvol.rvol_20ma,
+                current_volume=dashboard.rvol.current_volume,
+                poc_price=dashboard.rvol.poc_price,
+                poc_distance_pct=dashboard.rvol.poc_distance_pct,
+                price_vs_poc=dashboard.rvol.price_vs_poc,
+                bias=dashboard.rvol.bias.value,
+                conviction=dashboard.rvol.conviction,
+                details=dashboard.rvol.details,
+            )
+
+        vpin_response = None
+        if dashboard.vpin:
+            vpin_response = VPINResponse(
+                vpin=dashboard.vpin.vpin,
+                vpin_threshold=dashboard.vpin.vpin_threshold,
+                is_elevated=dashboard.vpin.is_elevated,
+                toxicity_level=dashboard.vpin.toxicity_level,
+                recent_trend=dashboard.vpin.recent_trend,
+                details=dashboard.vpin.details,
+            )
+
+        ldr_response = None
+        if dashboard.ldr:
+            ldr_response = LDRResponse(
+                ldr=dashboard.ldr.ldr,
+                total_bid_depth=dashboard.ldr.total_bid_depth,
+                total_ask_depth=dashboard.ldr.total_ask_depth,
+                bid_concentration=dashboard.ldr.bid_concentration,
+                ask_concentration=dashboard.ldr.ask_concentration,
+                support_wall=dashboard.ldr.support_wall,
+                resistance_wall=dashboard.ldr.resistance_wall,
+                bias=dashboard.ldr.bias.value,
+                details=dashboard.ldr.details,
+            )
+
+        return AdvancedMetricsResponse(
+            timestamp=dashboard.timestamp,
+            timeframe=timeframe,
+            rvol=rvol_response,
+            vpin=vpin_response,
+            ldr=ldr_response,
+            overall_bias=dashboard.overall_bias.value,
+            alert_level=dashboard.alert_level,
+        )
+
+
+# Agent Bias Response Models
+
+class TrendStructureResponse(BaseModel):
+    """Trend & Structure component (20% weight)"""
+    score: float
+    ema_trend: str
+    market_structure: str
+    price_vs_sr: str
+    details: str
+
+
+class MarketIntensityResponse(BaseModel):
+    """Market Intensity component (30% weight)"""
+    score: float
+    rvol: float
+    rvol_contribution: float
+    vpin: float
+    vpin_contribution: float
+    is_high_conviction: bool
+    details: str
+
+
+class OrderFlowAlphaResponse(BaseModel):
+    """Order Flow Alpha component (50% weight)"""
+    score: float
+    obi_score: float
+    ldr_score: float
+    absorption_score: float
+    lsf_score: float
+    active_signals: List[str]
+    details: str
+
+
+class AgentBiasResponse(BaseModel):
+    """Complete agent bias assessment"""
+    timestamp: int
+    timeframe: str
+    total_score: float  # 0-100
+    mode: str  # HIGH_BEARISH, WEAK_BEARISH, NEUTRAL, WEAK_BULLISH, HIGH_BULLISH
+    recommendation: str
+    confidence: str  # HIGH, MEDIUM, LOW
+    trend_structure: TrendStructureResponse
+    market_intensity: MarketIntensityResponse
+    orderflow_alpha: OrderFlowAlphaResponse
+    details: str
+
+
+@router.get("/agent-bias/{timeframe}", response_model=AgentBiasResponse)
+async def get_agent_bias(
+    timeframe: str = Path(..., pattern="^(5M|15M|1H|4H|1D)$"),
+    limit: int = Query(200, ge=50, le=1000, description="Number of bars for calculation"),
+):
+    """
+    Get unified agent bias score for trading decisions
+
+    Returns a 0-100 score combining:
+    - **Trend & Structure (20%)**: EMA 12/25 trend + market structure (HH/HL vs LH/LL) + S/R position
+    - **Market Intensity (30%)**: RVOL + VPIN - measures conviction behind moves
+    - **Order Flow Alpha (50%)**: OBI + LDR + Absorption + LSF - what big money is doing
+
+    Score Interpretation:
+    - **0-30 (HIGH_BEARISH)**: Short entries only, ignore support bounces
+    - **30-45 (WEAK_BEARISH)**: Exit longs, don't enter shorts yet
+    - **45-55 (NEUTRAL)**: Wait mode, avoid trading (chop zone)
+    - **55-70 (WEAK_BULLISH)**: Cautious longs at proven S/R only
+    - **70-100 (HIGH_BULLISH)**: Aggressive mode, buy breakouts
+    """
+    with DuckDBStorage() as storage:
+        # Get OHLCV data with indicators
+        df = storage.conn.execute(f"""
+            SELECT
+                timestamp,
+                open,
+                high,
+                low,
+                close,
+                volume,
+                dom_imbalance,
+                cvd as instant_delta
+            FROM order_book
+            WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
+            ORDER BY timestamp ASC
+            LIMIT {limit}
+        """).pl()
+
+        if len(df) == 0:
+            raise HTTPException(status_code=404, detail=f"No data for {timeframe}")
+
+        # Add depth estimates
+        df = df.with_columns([
+            (pl.col("volume") * pl.col("dom_imbalance")).alias("total_bid_depth"),
+            (pl.col("volume") * (1 - pl.col("dom_imbalance"))).alias("total_ask_depth"),
+        ])
+
+        # Calculate advanced metrics for RVOL, VPIN, LDR
+        metrics_calc = OrderflowMetricsCalculator()
+        rvol_metrics = metrics_calc.calculate_rvol(df)
+        vpin_metrics = metrics_calc.calculate_vpin(df)
+        ldr_metrics = metrics_calc.calculate_ldr(df)
+
+        # Get orderflow signals for absorption and LSF
+        detector = OrderflowSignalDetector(
+            absorption_volume_mult=1.3,
+            lsf_spike_mult=1.5,
+            obi_threshold=1.15,
+            lookback_bars=20,
+        )
+
+        # Only look at recent signals (last 20 bars)
+        recent_df = df.tail(20)
+        recent_df = recent_df.with_columns([
+            (pl.col("volume") * pl.col("dom_imbalance")).alias("total_bid_depth"),
+            (pl.col("volume") * (1 - pl.col("dom_imbalance"))).alias("total_ask_depth"),
+        ])
+
+        absorption_signals = detector.detect_absorption(recent_df)
+        lsf_signals = detector.detect_lsf(recent_df)
+
+        # Convert signals to dicts
+        abs_dicts = [{"direction": s.direction.value, "strength": s.strength} for s in absorption_signals]
+        lsf_dicts = [{"direction": s.direction.value, "strength": s.strength} for s in lsf_signals]
+
+        # Get S/R levels
+        sr_levels = None
+        try:
+            sr_df = storage.conn.execute(f"""
+                SELECT price, type, touches
+                FROM support_resistance
+                WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
+                ORDER BY touches DESC
+                LIMIT 10
+            """).pl()
+            if len(sr_df) > 0:
+                sr_levels = sr_df.to_dicts()
+        except Exception:
+            pass  # S/R table might not exist
+
+        # Calculate agent bias
+        bias_calc = AgentBiasCalculator()
+        bias_result = bias_calc.calculate_total_bias(
+            df=df,
+            sr_levels=sr_levels,
+            rvol=rvol_metrics.rvol if rvol_metrics else None,
+            vpin=vpin_metrics.vpin if vpin_metrics else None,
+            obi_ratio=ldr_metrics.ldr if ldr_metrics else None,  # Using LDR as OBI proxy
+            ldr=ldr_metrics.ldr if ldr_metrics else None,
+            absorption_signals=abs_dicts,
+            lsf_signals=lsf_dicts,
+        )
+
+        return AgentBiasResponse(
+            timestamp=int(datetime.utcnow().timestamp()),
+            timeframe=timeframe,
+            total_score=bias_result.total_score,
+            mode=bias_result.mode.value,
+            recommendation=bias_result.recommendation,
+            confidence=bias_result.confidence,
+            trend_structure=TrendStructureResponse(
+                score=bias_result.trend_structure.score,
+                ema_trend=bias_result.trend_structure.ema_trend.value,
+                market_structure=bias_result.trend_structure.market_structure.value,
+                price_vs_sr=bias_result.trend_structure.price_vs_sr,
+                details=bias_result.trend_structure.details,
+            ),
+            market_intensity=MarketIntensityResponse(
+                score=bias_result.market_intensity.score,
+                rvol=bias_result.market_intensity.rvol,
+                rvol_contribution=bias_result.market_intensity.rvol_contribution,
+                vpin=bias_result.market_intensity.vpin,
+                vpin_contribution=bias_result.market_intensity.vpin_contribution,
+                is_high_conviction=bias_result.market_intensity.is_high_conviction,
+                details=bias_result.market_intensity.details,
+            ),
+            orderflow_alpha=OrderFlowAlphaResponse(
+                score=bias_result.orderflow_alpha.score,
+                obi_score=bias_result.orderflow_alpha.obi_score,
+                ldr_score=bias_result.orderflow_alpha.ldr_score,
+                absorption_score=bias_result.orderflow_alpha.absorption_score,
+                lsf_score=bias_result.orderflow_alpha.lsf_score,
+                active_signals=bias_result.orderflow_alpha.active_signals,
+                details=bias_result.orderflow_alpha.details,
+            ),
+            details=bias_result.details,
+        )
+
+
+# Agent Decision Response Models
+
+class AgentDecisionResponse(BaseModel):
+    """Response from the trading agent"""
+    timestamp: int
+    timeframe: str
+    symbol: str
+    current_price: float
+
+    # Bias assessment
+    bias_score: float
+    agent_mode: str
+    confidence: str
+
+    # Component scores
+    trend_score: float
+    intensity_score: float
+    orderflow_score: float
+
+    # Position info
+    position: str
+    entry_price: Optional[float] = None
+
+    # Decision
+    action: str
+    action_reason: str
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+
+    # Execution info
+    iterations: int
+    messages: List[str]
+
+
+@router.get("/agent/{timeframe}", response_model=AgentDecisionResponse)
+async def run_trading_agent(
+    timeframe: str = Path(..., pattern="^(5M|15M|1H|4H|1D)$"),
+    position: str = Query("FLAT", pattern="^(FLAT|LONG|SHORT)$", description="Current position"),
+    entry_price: Optional[float] = Query(None, description="Entry price if in position"),
+):
+    """
+    Run the LangGraph trading agent
+
+    The agent follows a state machine:
+    1. **Observe**: Fetch current market data (OHLCV, orderflow metrics)
+    2. **Evaluate**: Calculate bias score (0-100) from Trend/Intensity/Orderflow
+    3. **Decide**: Make trading decision based on score and current position
+
+    Decision Matrix:
+    - **0-30 (HIGH_BEARISH)**: Short only, exit longs immediately
+    - **30-45 (WEAK_BEARISH)**: Exit longs, wait for clarity
+    - **45-55 (NEUTRAL)**: Wait mode, avoid new positions
+    - **55-70 (WEAK_BULLISH)**: Cautious longs at S/R only
+    - **70-100 (HIGH_BULLISH)**: Aggressive longs, add to winners
+
+    Possible Actions:
+    - WAIT: No action, continue monitoring
+    - ENTER_LONG / ENTER_SHORT: Open new position
+    - EXIT_LONG / EXIT_SHORT: Close position
+    - ADD_TO_LONG / ADD_TO_SHORT: Scale into position
+    """
+    # Run the agent
+    result = await run_agent(
+        timeframe=timeframe,
+        symbol="MNQ",
+        current_position=position,
+        entry_price=entry_price,
+    )
+
+    # Extract message contents
+    messages = []
+    for msg in result.get("messages", []):
+        if isinstance(msg, dict):
+            messages.append(msg.get("content", ""))
+        elif hasattr(msg, "content"):
+            messages.append(msg.content)
+
+    return AgentDecisionResponse(
+        timestamp=result.get("timestamp", int(datetime.utcnow().timestamp())),
+        timeframe=timeframe,
+        symbol=result.get("symbol", "MNQ"),
+        current_price=result.get("current_price", 0),
+        bias_score=result.get("bias_score", 50),
+        agent_mode=result.get("agent_mode", "NEUTRAL"),
+        confidence=result.get("confidence", "LOW"),
+        trend_score=result.get("trend_score", 50),
+        intensity_score=result.get("intensity_score", 50),
+        orderflow_score=result.get("orderflow_score", 50),
+        position=result.get("position", "FLAT"),
+        entry_price=result.get("entry_price"),
+        action=result.get("action", "WAIT"),
+        action_reason=result.get("action_reason", ""),
+        stop_loss=result.get("stop_loss"),
+        take_profit=result.get("take_profit"),
+        iterations=result.get("iteration", 0),
+        messages=messages,
+    )
