@@ -220,6 +220,15 @@ def process_file_iterative(file_path: Path) -> int:
         print(f"\n[1] Opening DBN file for iteration...")
         store = db.DBNStore.from_file(str(file_path))
 
+        # Check metadata to see if this is MNQ data
+        is_mnq_file = False
+        if hasattr(store, 'metadata') and hasattr(store.metadata, 'symbols'):
+            symbols = store.metadata.symbols
+            print(f"    File symbols: {symbols}")
+            is_mnq_file = any('MNQ' in s for s in symbols)
+            if is_mnq_file:
+                print(f"    Confirmed MNQ data - will process all records")
+
         print(f"[2] Iterating through records...")
 
         # Iterate through records one at a time
@@ -249,9 +258,11 @@ def process_file_iterative(file_path: Path) -> int:
                             if hasattr(record, attr_name):
                                 record_dict[attr_name] = getattr(record, attr_name)
 
-            # Add symbol if available
+            # Add symbol - from record if available, otherwise from metadata
             if hasattr(record, 'symbol'):
                 record_dict['symbol'] = record.symbol
+            elif is_mnq_file:
+                record_dict['symbol'] = 'MNQ'  # Add MNQ symbol for filtering
 
             buffer.append(record_dict)
 

@@ -1,4 +1,4 @@
-"""Order flow calculations from MBP-10 data"""
+"""Order flow calculations from MBP-1 and Trades data"""
 import logging
 from typing import Dict, Tuple
 import polars as pl
@@ -8,18 +8,25 @@ logger = logging.getLogger(__name__)
 
 
 class OrderFlowCalculator:
-    """Calculate order flow metrics from MBP-10 order book data"""
+    """Calculate order flow metrics from MBP-1 order book data
+
+    Supports both MBP-1 (top of book) and MBP-10 (10 levels) for backwards compatibility.
+    For live streaming, MBP-1 is used. For historical analysis, MBP-10 may be available.
+    """
 
     def __init__(
         self,
-        cvd_window_config: dict = None
+        cvd_window_config: dict = None,
+        levels: int = 1
     ):
         """Initialize calculator
 
         Args:
             cvd_window_config: Dict mapping timeframe to CVD rolling window size
                               Default: {'5M': 288, '15M': 96, '1H': 24, '4H': 30, '1D': 5}
+            levels: Number of order book levels (1 for MBP-1, 10 for MBP-10)
         """
+        self.levels = levels
         # Default CVD rolling window sizes (roughly 24 hours for intraday, 5 days for daily)
         self.cvd_window_config = cvd_window_config or {
             '5M': 288,   # 24 hours (288 * 5min = 1440min = 24h)
@@ -28,12 +35,12 @@ class OrderFlowCalculator:
             '4H': 30,    # 5 days (30 * 4h = 120h = 5 days)
             '1D': 5,     # 5 days
         }
-        logger.info(f"OrderFlowCalculator initialized with CVD windows: {self.cvd_window_config}")
+        logger.info(f"OrderFlowCalculator initialized with {levels} levels, CVD windows: {self.cvd_window_config}")
 
     def calculate_dom_imbalance(
         self,
         df: pl.DataFrame,
-        levels: int = 10
+        levels: int = None
     ) -> pl.DataFrame:
         """Calculate DOM (Depth of Market) imbalance
 
@@ -42,31 +49,47 @@ class OrderFlowCalculator:
         < 0.5: Ask heavy (bearish)
         = 0.5: Balanced
 
+        For MBP-1: Uses only top-of-book (level 0)
+        For MBP-10: Uses all 10 levels
+
         Args:
             df: DataFrame with bid/ask levels
-            levels: Number of levels to consider (default 10 for MBP-10)
+            levels: Number of levels to consider (default: use self.levels)
 
         Returns:
             DataFrame with dom_imbalance column
         """
-        logger.info(f"Calculating DOM imbalance for {len(df)} records")
+        levels = levels or self.levels
+        logger.info(f"Calculating DOM imbalance for {len(df)} records using {levels} level(s)")
 
-        # Sum bid volumes across all levels
-        bid_cols = [f"bid_sz_{i:02d}" for i in range(levels)]
-        ask_cols = [f"ask_sz_{i:02d}" for i in range(levels)]
+        # Sum bid volumes across available levels
+        bid_cols = [f"bid_sz_{i:02d}" for i in range(levels) if f"bid_sz_{i:02d}" in df.columns]
+        ask_cols = [f"ask_sz_{i:02d}" for i in range(levels) if f"ask_sz_{i:02d}" in df.columns]
+
+        # If no level columns found, check for simple bid_sz/ask_sz columns
+        if not bid_cols and "bid_sz" in df.columns:
+            bid_cols = ["bid_sz"]
+            ask_cols = ["ask_sz"]
+
+        if not bid_cols:
+            logger.warning("No bid/ask size columns found, using default imbalance of 0.5")
+            return df.with_columns([
+                pl.lit(0).alias("total_bid_volume"),
+                pl.lit(0).alias("total_ask_volume"),
+                pl.lit(0.5).alias("dom_imbalance")
+            ])
 
         df = df.with_columns([
-            pl.sum_horizontal([pl.col(c) for c in bid_cols if c in df.columns])
-            .alias("total_bid_volume"),
-            pl.sum_horizontal([pl.col(c) for c in ask_cols if c in df.columns])
-            .alias("total_ask_volume"),
+            pl.sum_horizontal([pl.col(c) for c in bid_cols]).alias("total_bid_volume"),
+            pl.sum_horizontal([pl.col(c) for c in ask_cols]).alias("total_ask_volume"),
         ])
 
-        # Calculate imbalance ratio
+        # Calculate imbalance ratio (avoid division by zero)
         df = df.with_columns([
-            (pl.col("total_bid_volume") /
-             (pl.col("total_bid_volume") + pl.col("total_ask_volume"))
-            ).alias("dom_imbalance")
+            pl.when((pl.col("total_bid_volume") + pl.col("total_ask_volume")) > 0)
+              .then(pl.col("total_bid_volume") / (pl.col("total_bid_volume") + pl.col("total_ask_volume")))
+              .otherwise(0.5)
+              .alias("dom_imbalance")
         ])
 
         return df
@@ -150,7 +173,7 @@ class OrderFlowCalculator:
 
         - Spread
         - Depth at best levels
-        - Average depth across levels
+        - Average depth across levels (if available)
 
         Args:
             df: DataFrame with order book data
@@ -160,24 +183,35 @@ class OrderFlowCalculator:
         """
         logger.info(f"Calculating liquidity metrics for {len(df)} records")
 
-        df = df.with_columns([
-            # Spread
-            (pl.col("ask_px_00") - pl.col("bid_px_00")).alias("spread"),
+        result_cols = []
 
-            # Best bid/ask size
-            pl.col("bid_sz_00").alias("best_bid_size"),
-            pl.col("ask_sz_00").alias("best_ask_size"),
+        # Spread - works with both MBP-1 and MBP-10
+        if "ask_px_00" in df.columns and "bid_px_00" in df.columns:
+            result_cols.append((pl.col("ask_px_00") - pl.col("bid_px_00")).alias("spread"))
+            result_cols.append(pl.col("bid_sz_00").alias("best_bid_size"))
+            result_cols.append(pl.col("ask_sz_00").alias("best_ask_size"))
+        elif "ask_px" in df.columns and "bid_px" in df.columns:
+            result_cols.append((pl.col("ask_px") - pl.col("bid_px")).alias("spread"))
+            result_cols.append(pl.col("bid_sz").alias("best_bid_size"))
+            result_cols.append(pl.col("ask_sz").alias("best_ask_size"))
 
-            # Average size across top 5 levels
-            pl.mean_horizontal([
-                pl.col(f"bid_sz_{i:02d}")
-                for i in range(5)
-            ]).alias("avg_bid_depth_5"),
-            pl.mean_horizontal([
-                pl.col(f"ask_sz_{i:02d}")
-                for i in range(5)
-            ]).alias("avg_ask_depth_5"),
-        ])
+        # Average depth across levels (only for MBP-10)
+        if self.levels > 1:
+            bid_depth_cols = [f"bid_sz_{i:02d}" for i in range(min(5, self.levels)) if f"bid_sz_{i:02d}" in df.columns]
+            ask_depth_cols = [f"ask_sz_{i:02d}" for i in range(min(5, self.levels)) if f"ask_sz_{i:02d}" in df.columns]
+
+            if bid_depth_cols:
+                result_cols.append(pl.mean_horizontal([pl.col(c) for c in bid_depth_cols]).alias("avg_bid_depth_5"))
+            if ask_depth_cols:
+                result_cols.append(pl.mean_horizontal([pl.col(c) for c in ask_depth_cols]).alias("avg_ask_depth_5"))
+        else:
+            # For MBP-1, avg depth equals best level depth
+            if "bid_sz_00" in df.columns:
+                result_cols.append(pl.col("bid_sz_00").alias("avg_bid_depth_5"))
+                result_cols.append(pl.col("ask_sz_00").alias("avg_ask_depth_5"))
+
+        if result_cols:
+            df = df.with_columns(result_cols)
 
         return df
 

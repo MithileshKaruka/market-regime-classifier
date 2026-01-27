@@ -192,6 +192,10 @@ def evaluate_bias(state: AgentState) -> AgentState:
     abs_dicts = [{"direction": s.direction.value, "strength": s.strength} for s in absorption_signals]
     lsf_dicts = [{"direction": s.direction.value, "strength": s.strength} for s in lsf_signals]
 
+    # Get latest CVD value from the data
+    latest = df.tail(1).to_dicts()[0]
+    cvd_value = latest.get("instant_delta")  # CVD is aliased as instant_delta from query
+
     # Calculate total bias
     bias_calc = AgentBiasCalculator()
     bias_result = bias_calc.calculate_total_bias(
@@ -202,6 +206,7 @@ def evaluate_bias(state: AgentState) -> AgentState:
         ldr=ldr_metrics.ldr if ldr_metrics else None,
         absorption_signals=abs_dicts,
         lsf_signals=lsf_dicts,
+        cvd=cvd_value,
     )
 
     evaluation_msg = (

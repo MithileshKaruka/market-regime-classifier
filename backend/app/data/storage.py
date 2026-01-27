@@ -70,8 +70,8 @@ class DuckDBStorage:
             )
         """)
 
-        # MBP-10 tick data for order flow analysis
-        # Stores aggregated metrics from raw MBP-10 snapshots
+        # MBP tick data for order flow analysis (supports MBP-1 and MBP-10)
+        # Stores aggregated metrics from raw MBP snapshots
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS mbp_ticks (
                 timestamp TIMESTAMP,
@@ -88,6 +88,20 @@ class DuckDBStorage:
                 delta DOUBLE,
                 cvd DOUBLE,
                 PRIMARY KEY (timestamp, symbol)
+            )
+        """)
+
+        # Trades table for accurate CVD calculation from trade aggressor side
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS trades (
+                timestamp TIMESTAMP,
+                symbol VARCHAR,
+                price DOUBLE,
+                size INTEGER,
+                side VARCHAR,
+                signed_size INTEGER,
+                delta BIGINT,
+                PRIMARY KEY (timestamp, symbol, price, size)
             )
         """)
 
@@ -407,6 +421,104 @@ class DuckDBStorage:
         result = self.conn.execute(f"""
             SELECT COUNT(*) as cnt
             FROM mbp_ticks
+            WHERE symbol = '{symbol}'
+        """).fetchone()
+        return result[0] if result else 0
+
+    def insert_trades(
+        self,
+        df: pl.DataFrame,
+        symbol: str = "MNQ"
+    ):
+        """Insert trade data into database
+
+        Args:
+            df: Polars DataFrame with trade data
+            symbol: Trading symbol
+        """
+        logger.info(f"Inserting {len(df)} trade records")
+
+        # Determine timestamp column name
+        ts_col = "ts_event" if "ts_event" in df.columns else "timestamp"
+
+        # Build column selection
+        columns = [
+            pl.col(ts_col).alias("timestamp"),
+            pl.lit(symbol).alias("symbol"),
+        ]
+
+        # Required columns
+        for col in ["price", "size", "side", "signed_size", "delta"]:
+            if col in df.columns:
+                columns.append(pl.col(col))
+            else:
+                # Default values
+                if col == "side":
+                    columns.append(pl.lit("N").alias(col))
+                else:
+                    columns.append(pl.lit(0).alias(col))
+
+        df_insert = df.select(columns)
+
+        # Insert into DuckDB
+        self.conn.execute("""
+            INSERT OR REPLACE INTO trades
+            SELECT * FROM df_insert
+        """)
+
+        self.conn.commit()
+        logger.info("Trade data inserted successfully")
+
+    def get_trades(
+        self,
+        symbol: str = "MNQ",
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+        limit: int = 1000
+    ) -> pl.DataFrame:
+        """Get trade data
+
+        Args:
+            symbol: Trading symbol
+            start_time: Start timestamp (ISO format)
+            end_time: End timestamp (ISO format)
+            limit: Number of records to return
+
+        Returns:
+            DataFrame with trade data
+        """
+        where_clauses = [f"symbol = '{symbol}'"]
+
+        if start_time:
+            where_clauses.append(f"timestamp >= '{start_time}'")
+        if end_time:
+            where_clauses.append(f"timestamp <= '{end_time}'")
+
+        where_str = " AND ".join(where_clauses)
+
+        query = f"""
+            SELECT *
+            FROM trades
+            WHERE {where_str}
+            ORDER BY timestamp DESC
+            LIMIT {limit}
+        """
+
+        df = self.conn.execute(query).pl()
+        return df
+
+    def get_trade_count(self, symbol: str = "MNQ") -> int:
+        """Get total count of trades for a symbol
+
+        Args:
+            symbol: Trading symbol
+
+        Returns:
+            Total count of trades
+        """
+        result = self.conn.execute(f"""
+            SELECT COUNT(*) as cnt
+            FROM trades
             WHERE symbol = '{symbol}'
         """).fetchone()
         return result[0] if result else 0

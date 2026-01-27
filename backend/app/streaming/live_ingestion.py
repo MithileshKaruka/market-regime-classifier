@@ -1,12 +1,20 @@
-"""Live data ingestion from Databento stream with in-memory caching"""
+"""Live data ingestion from Databento stream with MBP-1 + Trades schemas
+
+This module handles real-time market data streaming using:
+- MBP-1: Top-of-book quotes for DOM imbalance and spread
+- Trades: Individual trade executions for accurate CVD/delta
+
+These schemas are available on Databento's personal plan for live streaming.
+"""
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Dict, Any
 import databento as db
 import polars as pl
 
 from app.features.order_flow import OrderFlowCalculator
+from app.features.trade_flow import TradeFlowCalculator, merge_quotes_and_trades
 from app.classifiers.regime import RegimeClassifier
 from app.data.storage import DuckDBStorage
 from app.streaming.live_cache import get_cache
@@ -19,7 +27,17 @@ logger = logging.getLogger(__name__)
 
 
 class LiveDataIngestion:
-    """Handles real-time streaming from Databento with in-memory caching"""
+    """Handles real-time streaming from Databento with MBP-1 + Trades
+
+    Subscribes to two schemas:
+    - mbp-1: Top-of-book quotes (best bid/ask)
+    - trades: Individual trade executions
+
+    Combines both to calculate:
+    - DOM imbalance from quotes
+    - True CVD/delta from trade aggressor side
+    - OHLCV from trade prices
+    """
 
     def __init__(
         self,
@@ -37,22 +55,30 @@ class LiveDataIngestion:
         self.db_path = db_path
         self.flush_interval = flush_interval_seconds
 
-        self.calculator = OrderFlowCalculator()
+        # Calculators - MBP-1 uses 1 level
+        self.quote_calculator = OrderFlowCalculator(levels=1)
+        self.trade_calculator = TradeFlowCalculator()
         self.classifier = RegimeClassifier()
         self.cache = get_cache()
 
-        # Tick buffer for batch DB writes
-        self.tick_buffer = []
+        # Separate buffers for quotes and trades
+        self.quote_buffer = []
+        self.trade_buffer = []
         self.last_flush_time = datetime.utcnow()
 
         # Current bars in memory (one per timeframe per symbol)
-        self.current_bars = {}
+        self.current_bars: Dict[str, Dict[str, Optional[Dict]]] = {}
         for tf in self.timeframes:
             self.current_bars[tf] = {}
             for symbol in self.symbols:
                 self.current_bars[tf][symbol] = None
 
-        logger.info(f"LiveDataIngestion initialized for {self.symbols} on timeframes {self.timeframes}")
+        # Track latest quote for each symbol (for combining with trades)
+        self.latest_quotes: Dict[str, Dict[str, Any]] = {s: {} for s in self.symbols}
+
+        logger.info(f"LiveDataIngestion initialized for {self.symbols}")
+        logger.info(f"  Timeframes: {self.timeframes}")
+        logger.info(f"  Schemas: mbp-1 (quotes) + trades")
 
     def get_timeframe_interval(self, timeframe: str) -> timedelta:
         """Convert timeframe string to timedelta"""
@@ -82,80 +108,103 @@ class LiveDataIngestion:
             return ts.replace(hour=0, minute=0, second=0, microsecond=0)
         return ts
 
-    def extract_tick(self, record) -> dict:
-        """Extract tick data from MBP-10 record"""
+    def extract_quote(self, record) -> dict:
+        """Extract quote data from MBP-1 record"""
+        # MBP-1 has a single level
         levels = record.levels
 
-        tick = {
+        quote = {
             'ts_event': record.ts_event,
             'instrument_id': record.instrument_id,
         }
 
-        # Extract 10 levels
-        for i in range(10):
-            if i < len(levels):
-                level = levels[i]
-                tick[f'bid_px_{i:02d}'] = level.bid_px / 1_000_000_000.0
-                tick[f'bid_sz_{i:02d}'] = level.bid_sz
-                tick[f'bid_ct_{i:02d}'] = level.bid_ct
-                tick[f'ask_px_{i:02d}'] = level.ask_px / 1_000_000_000.0
-                tick[f'ask_sz_{i:02d}'] = level.ask_sz
-                tick[f'ask_ct_{i:02d}'] = level.ask_ct
-            else:
-                tick[f'bid_px_{i:02d}'] = 0.0
-                tick[f'bid_sz_{i:02d}'] = 0
-                tick[f'bid_ct_{i:02d}'] = 0
-                tick[f'ask_px_{i:02d}'] = 0.0
-                tick[f'ask_sz_{i:02d}'] = 0
-                tick[f'ask_ct_{i:02d}'] = 0
+        if levels and len(levels) > 0:
+            level = levels[0]
+            quote['bid_px_00'] = level.bid_px / 1_000_000_000.0
+            quote['bid_sz_00'] = level.bid_sz
+            quote['ask_px_00'] = level.ask_px / 1_000_000_000.0
+            quote['ask_sz_00'] = level.ask_sz
+        else:
+            quote['bid_px_00'] = 0.0
+            quote['bid_sz_00'] = 0
+            quote['ask_px_00'] = 0.0
+            quote['ask_sz_00'] = 0
 
-        return tick
+        return quote
 
-    def update_bar_with_tick(self, bar: dict, tick_features: dict) -> dict:
-        """Update an existing bar with a new tick"""
+    def extract_trade(self, record) -> dict:
+        """Extract trade data from Trades record"""
+        trade = {
+            'ts_event': record.ts_event,
+            'instrument_id': record.instrument_id,
+            'price': record.price / 1_000_000_000.0,
+            'size': record.size,
+            'side': record.side,  # 'A' = ask (buy aggressor), 'B' = bid (sell aggressor)
+        }
+        return trade
+
+    def update_bar_with_trade(self, bar: Optional[dict], trade: dict, quote: dict) -> dict:
+        """Update an existing bar with a new trade"""
+        price = trade['price']
+        size = trade['size']
+        signed_size = size if trade['side'] == 'A' else -size
+
+        # Get DOM imbalance from latest quote
+        dom_imbalance = 0.5
+        if quote:
+            total_bid = quote.get('bid_sz_00', 0)
+            total_ask = quote.get('ask_sz_00', 0)
+            if total_bid + total_ask > 0:
+                dom_imbalance = total_bid / (total_bid + total_ask)
+
         if bar is None:
             # Create new bar
             return {
-                'timestamp': tick_features['timestamp'],
-                'open': tick_features['mid_price'],
-                'high': tick_features['mid_price'],
-                'low': tick_features['mid_price'],
-                'close': tick_features['mid_price'],
-                'volume': tick_features.get('volume', 0),
-                'dom_imbalance': tick_features['dom_imbalance'],
-                'delta': tick_features['delta'],
-                'vwap': tick_features['vwap'],
+                'timestamp': trade['bar_timestamp'],
+                'open': price,
+                'high': price,
+                'low': price,
+                'close': price,
+                'volume': size,
+                'dom_imbalance': dom_imbalance,
+                'delta': signed_size,
+                'vwap': price,
+                'trade_count': 1,
+                'price_volume_sum': price * size,
             }
         else:
             # Update existing bar
-            bar['high'] = max(bar['high'], tick_features['mid_price'])
-            bar['low'] = min(bar['low'], tick_features['mid_price'])
-            bar['close'] = tick_features['mid_price']
-            bar['volume'] += tick_features.get('volume', 0)
-            # Rolling average for DOM imbalance, delta, vwap
-            bar['dom_imbalance'] = (bar['dom_imbalance'] + tick_features['dom_imbalance']) / 2
-            bar['delta'] += tick_features['delta']
-            bar['vwap'] = (bar['vwap'] + tick_features['vwap']) / 2
+            bar['high'] = max(bar['high'], price)
+            bar['low'] = min(bar['low'], price)
+            bar['close'] = price
+            bar['volume'] += size
+            bar['delta'] += signed_size
+            bar['trade_count'] += 1
+            bar['price_volume_sum'] += price * size
+            bar['vwap'] = bar['price_volume_sum'] / bar['volume']
+            # Update DOM imbalance (exponential moving average)
+            bar['dom_imbalance'] = 0.9 * bar['dom_imbalance'] + 0.1 * dom_imbalance
             return bar
 
-    async def process_tick(self, tick: dict, symbol: str):
-        """Process a single tick and update in-memory bars"""
+    async def process_quote(self, quote: dict, symbol: str):
+        """Process a quote update - just store latest for combining with trades"""
+        self.latest_quotes[symbol] = quote
+        self.quote_buffer.append(quote)
+
+    async def process_trade(self, trade: dict, symbol: str):
+        """Process a trade and update bars"""
         try:
-            # Convert to DataFrame for feature calculation
-            df_tick = pl.DataFrame([tick])
+            # Get latest quote for this symbol
+            latest_quote = self.latest_quotes.get(symbol, {})
 
-            # Calculate order flow features
-            df_tick = self.calculator.calculate_all_features(df_tick)
-            tick_features = df_tick.row(0, named=True)
-
-            # Convert ts_event to datetime
-            tick_ts = datetime.fromtimestamp(tick_features['ts_event'] / 1e9)
+            # Convert timestamp
+            trade_ts = datetime.fromtimestamp(trade['ts_event'] / 1e9)
 
             # Update bars for each timeframe
             for tf in self.timeframes:
-                bar_ts = self.truncate_timestamp(tick_ts, tf)
+                bar_ts = self.truncate_timestamp(trade_ts, tf)
+                trade['bar_timestamp'] = bar_ts
 
-                # Get current bar
                 current_bar = self.current_bars[tf][symbol]
 
                 # Check if we need a new bar
@@ -184,31 +233,17 @@ class LiveDataIngestion:
                         })
 
                     # Start new bar
-                    current_bar = self.update_bar_with_tick(None, {
-                        'timestamp': bar_ts,
-                        'mid_price': tick_features['mid_price'],
-                        'volume': 1,
-                        'dom_imbalance': tick_features['dom_imbalance'],
-                        'delta': tick_features['delta'],
-                        'vwap': tick_features['vwap'],
-                    })
+                    current_bar = self.update_bar_with_trade(None, trade, latest_quote)
                     self.current_bars[tf][symbol] = current_bar
                 else:
                     # Update existing bar
-                    current_bar = self.update_bar_with_tick(current_bar, {
-                        'timestamp': bar_ts,
-                        'mid_price': tick_features['mid_price'],
-                        'volume': 1,
-                        'dom_imbalance': tick_features['dom_imbalance'],
-                        'delta': tick_features['delta'],
-                        'vwap': tick_features['vwap'],
-                    })
+                    current_bar = self.update_bar_with_trade(current_bar, trade, latest_quote)
                     self.current_bars[tf][symbol] = current_bar
 
-                    # Also update cache with current (incomplete) bar
+                    # Update cache with current bar
                     self.cache.update_bar(tf, symbol, current_bar)
 
-                    # Classify and cache regime for current bar
+                    # Classify and cache regime
                     regime = self.classifier.classify_single(
                         dom_imbalance=current_bar['dom_imbalance'],
                         delta=current_bar['delta'],
@@ -227,29 +262,39 @@ class LiveDataIngestion:
                     })
 
             # Add to buffer for DB flush
-            self.tick_buffer.append(tick)
+            self.trade_buffer.append(trade)
 
         except Exception as e:
-            logger.error(f"Error processing tick: {e}", exc_info=True)
+            logger.error(f"Error processing trade: {e}", exc_info=True)
 
     async def flush_to_database(self):
-        """Flush buffered ticks to DuckDB (runs in background)"""
-        if len(self.tick_buffer) == 0:
+        """Flush buffered data to DuckDB"""
+        if len(self.trade_buffer) == 0:
             return
 
         try:
-            logger.info(f"Flushing {len(self.tick_buffer)} ticks to database...")
+            logger.info(f"Flushing {len(self.trade_buffer)} trades to database...")
 
-            # Convert buffer to DataFrame
-            df = pl.DataFrame(self.tick_buffer)
+            # Convert trade buffer to DataFrame
+            df_trades = pl.DataFrame(self.trade_buffer)
 
-            # Calculate features
-            df = self.calculator.calculate_all_features(df)
+            # Calculate trade features
+            df_trades = self.trade_calculator.calculate_all_features(df_trades)
+
+            # Convert quote buffer if available
+            df_quotes = None
+            if self.quote_buffer:
+                df_quotes = pl.DataFrame(self.quote_buffer)
+                df_quotes = self.quote_calculator.calculate_all_features(df_quotes)
 
             # Store for each timeframe
             with DuckDBStorage(db_path=self.db_path) as storage:
                 for tf in self.timeframes:
-                    df_tf = self.calculator.resample_to_timeframe(df, tf)
+                    df_tf = self.trade_calculator.resample_to_timeframe(df_trades, tf)
+
+                    if df_quotes is not None and len(df_quotes) > 0:
+                        df_quotes_tf = self.quote_calculator.resample_to_timeframe(df_quotes, tf)
+                        df_tf = merge_quotes_and_trades(df_quotes_tf, df_tf, tf)
 
                     if len(df_tf) > 0:
                         df_tf = df_tf.with_columns([
@@ -265,8 +310,9 @@ class LiveDataIngestion:
 
             logger.info(f"✓ Flushed to database")
 
-            # Clear buffer
-            self.tick_buffer.clear()
+            # Clear buffers
+            self.trade_buffer.clear()
+            self.quote_buffer.clear()
 
         except Exception as e:
             logger.error(f"Error flushing to database: {e}", exc_info=True)
@@ -281,9 +327,9 @@ class LiveDataIngestion:
             self.last_flush_time = now
 
     async def start_streaming(self):
-        """Start consuming live market data"""
+        """Start consuming live market data from both schemas"""
         logger.info("="*60)
-        logger.info("Starting live data ingestion...")
+        logger.info("Starting live data ingestion (MBP-1 + Trades)...")
         logger.info(f"  Symbols: {self.symbols}")
         logger.info(f"  Timeframes: {self.timeframes}")
         logger.info(f"  DB flush interval: {self.flush_interval}s")
@@ -292,30 +338,51 @@ class LiveDataIngestion:
         client = db.Live(key=self.api_key)
 
         try:
-            # Subscribe to MBP-10 data
+            # Subscribe to MBP-1 (top-of-book quotes)
             client.subscribe(
                 dataset=self.dataset,
-                schema="mbp-10",
+                schema="mbp-1",
                 symbols=self.symbols,
                 stype_in="parent",
             )
+            logger.info("✓ Subscribed to MBP-1 (quotes)")
 
-            logger.info("✓ Subscribed to live stream")
+            # Subscribe to Trades
+            client.subscribe(
+                dataset=self.dataset,
+                schema="trades",
+                symbols=self.symbols,
+                stype_in="parent",
+            )
+            logger.info("✓ Subscribed to Trades")
 
-            tick_count = 0
+            quote_count = 0
+            trade_count = 0
 
             async for record in client:
-                tick = self.extract_tick(record)
-                await self.process_tick(tick, symbol="MNQ")
+                record_type = type(record).__name__
 
-                tick_count += 1
+                if record_type == "MBP1Msg":
+                    # Quote update
+                    quote = self.extract_quote(record)
+                    await self.process_quote(quote, symbol="MNQ")
+                    quote_count += 1
+
+                elif record_type == "TradeMsg":
+                    # Trade execution
+                    trade = self.extract_trade(record)
+                    await self.process_trade(trade, symbol="MNQ")
+                    trade_count += 1
 
                 # Periodic flush to database
                 await self.check_and_flush_database()
 
                 # Log progress
-                if tick_count % 1000 == 0:
-                    logger.info(f"Processed {tick_count:,} ticks, buffer: {len(self.tick_buffer)}")
+                if (quote_count + trade_count) % 1000 == 0:
+                    logger.info(
+                        f"Processed {quote_count:,} quotes, {trade_count:,} trades, "
+                        f"buffer: {len(self.trade_buffer)}"
+                    )
 
         except KeyboardInterrupt:
             logger.info("\nShutting down...")
@@ -341,7 +408,7 @@ async def main():
     ingestion = LiveDataIngestion(
         api_key=api_key,
         db_path=db_path,
-        flush_interval_seconds=1.0  # Flush to DB every 1 second
+        flush_interval_seconds=1.0
     )
 
     await ingestion.start_streaming()

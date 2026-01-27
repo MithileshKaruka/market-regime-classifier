@@ -59,6 +59,7 @@ class OrderflowAlphaConfig:
     obi_strong_imbalance: float = 1.5
     obi_moderate_imbalance: float = 1.2
     ldr_wall_threshold: float = 2.5
+    cvd_threshold: float = 5000  # CVD threshold for scoring (contracts)
     absorption_volume_mult: float = 1.3
     absorption_lookback: int = 20
     lsf_spike_mult: float = 1.5

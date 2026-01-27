@@ -1,11 +1,15 @@
-"""Update order_book table with real DOM imbalance and CVD from mbp_ticks data
+"""Update order_book table with DOM imbalance and CVD from tick/trade data
+
+This script supports two data sources:
+1. mbp_ticks (MBP-1 or MBP-10) - for DOM imbalance
+2. trades - for accurate CVD from trade aggressor side (preferred)
 
 For 5M, 15M, 1H: Uses time_bucket which aligns with order_book timestamps
 For 4H, 1D: Joins ticks to existing order_book bar windows (CME session boundaries)
 
-Note: Delta values in mbp_ticks are stored as uint32, where negative values
-wrap around (e.g., -1 becomes 4294967295). This script converts them to
-signed int32 before summing for CVD calculation.
+Data priority:
+- CVD: Uses trades table if available (more accurate), falls back to mbp_ticks
+- DOM: Uses mbp_ticks table (order book imbalance)
 """
 import sys
 from pathlib import Path
@@ -16,39 +20,44 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from app.data.storage import DuckDBStorage
 import polars as pl
 
-# Threshold for detecting wrapped negative values (2^31)
-UINT32_WRAP_THRESHOLD = 2147483648
-
-
-def convert_delta_to_signed(delta_value):
-    """Convert uint32 delta to signed int32
-
-    Values >= 2^31 are actually negative (wrapped around)
-    e.g., 4294967295 (-1) -> -1
-          4294967288 (-8) -> -8
-    """
-    if delta_value >= UINT32_WRAP_THRESHOLD:
-        return delta_value - 4294967296  # 2^32
-    return delta_value
-
 
 def update_orderflow_metrics():
-    """Calculate and update DOM imbalance and CVD from mbp_ticks to order_book"""
+    """Calculate and update DOM imbalance and CVD from tick/trade data to order_book"""
 
     with DuckDBStorage() as storage:
-        # Check mbp_ticks data
+        # Check available data sources
         tick_count = storage.conn.execute("SELECT COUNT(*) FROM mbp_ticks").fetchone()[0]
-        print(f"Found {tick_count:,} mbp_ticks records")
 
-        if tick_count == 0:
-            print("No mbp_ticks data available!")
+        # Check if trades table exists and has data
+        try:
+            trade_count = storage.conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+        except Exception:
+            trade_count = 0
+
+        print(f"Data sources:")
+        print(f"  mbp_ticks: {tick_count:,} records")
+        print(f"  trades: {trade_count:,} records")
+
+        if tick_count == 0 and trade_count == 0:
+            print("\nNo tick or trade data available!")
             return
 
-        # Get time range of mbp_ticks
-        time_range = storage.conn.execute("""
-            SELECT MIN(timestamp), MAX(timestamp) FROM mbp_ticks
-        """).fetchone()
-        print(f"MBP ticks time range: {time_range[0]} to {time_range[1]}")
+        # Determine CVD source
+        use_trades_for_cvd = trade_count > 0
+        print(f"\nUsing {'trades' if use_trades_for_cvd else 'mbp_ticks'} for CVD calculation")
+
+        # Get time ranges
+        if tick_count > 0:
+            tick_range = storage.conn.execute("""
+                SELECT MIN(timestamp), MAX(timestamp) FROM mbp_ticks
+            """).fetchone()
+            print(f"MBP ticks time range: {tick_range[0]} to {tick_range[1]}")
+
+        if trade_count > 0:
+            trade_range = storage.conn.execute("""
+                SELECT MIN(timestamp), MAX(timestamp) FROM trades
+            """).fetchone()
+            print(f"Trades time range: {trade_range[0]} to {trade_range[1]}")
 
         # CVD rolling windows
         cvd_windows = {
@@ -71,25 +80,73 @@ def update_orderflow_metrics():
             print(f"\nProcessing {tf}...")
             interval = timeframe_intervals[tf]
 
-            # Aggregate mbp_ticks by timeframe to get DOM imbalance and delta
-            # Convert uint32 delta to signed: if delta >= 2^31, it's negative (delta - 2^32)
-            agg_query = f"""
-                SELECT
-                    time_bucket(INTERVAL '{interval}', timestamp) as bucket_ts,
-                    AVG(dom_imbalance) as avg_dom_imbalance,
-                    SUM(CASE WHEN delta >= 2147483648 THEN delta - 4294967296 ELSE delta END) as total_delta,
-                    COUNT(*) as tick_count
-                FROM mbp_ticks
-                WHERE symbol = 'MNQ'
-                GROUP BY bucket_ts
-                ORDER BY bucket_ts
-            """
+            # Build aggregation query based on available data
+            if tick_count > 0 and trade_count > 0:
+                # Both sources available - use ticks for DOM, trades for CVD
+                agg_query = f"""
+                    WITH tick_agg AS (
+                        SELECT
+                            time_bucket(INTERVAL '{interval}', timestamp) as bucket_ts,
+                            AVG(dom_imbalance) as avg_dom_imbalance
+                        FROM mbp_ticks
+                        WHERE symbol = 'MNQ'
+                        GROUP BY bucket_ts
+                    ),
+                    trade_agg AS (
+                        SELECT
+                            time_bucket(INTERVAL '{interval}', timestamp) as bucket_ts,
+                            SUM(signed_size) as total_delta
+                        FROM trades
+                        WHERE symbol = 'MNQ'
+                        GROUP BY bucket_ts
+                    )
+                    SELECT
+                        COALESCE(t.bucket_ts, tr.bucket_ts) as bucket_ts,
+                        t.avg_dom_imbalance,
+                        tr.total_delta,
+                        1 as tick_count
+                    FROM tick_agg t
+                    FULL OUTER JOIN trade_agg tr ON t.bucket_ts = tr.bucket_ts
+                    ORDER BY bucket_ts
+                """
+            elif trade_count > 0:
+                # Only trades available
+                agg_query = f"""
+                    SELECT
+                        time_bucket(INTERVAL '{interval}', timestamp) as bucket_ts,
+                        0.5 as avg_dom_imbalance,
+                        SUM(signed_size) as total_delta,
+                        COUNT(*) as tick_count
+                    FROM trades
+                    WHERE symbol = 'MNQ'
+                    GROUP BY bucket_ts
+                    ORDER BY bucket_ts
+                """
+            else:
+                # Only mbp_ticks available
+                agg_query = f"""
+                    SELECT
+                        time_bucket(INTERVAL '{interval}', timestamp) as bucket_ts,
+                        AVG(dom_imbalance) as avg_dom_imbalance,
+                        SUM(CASE WHEN delta >= 2147483648 THEN delta - 4294967296 ELSE delta END) as total_delta,
+                        COUNT(*) as tick_count
+                    FROM mbp_ticks
+                    WHERE symbol = 'MNQ'
+                    GROUP BY bucket_ts
+                    ORDER BY bucket_ts
+                """
 
             df_agg = storage.conn.execute(agg_query).pl()
             print(f"  Aggregated to {len(df_agg)} {tf} bars")
 
             if len(df_agg) == 0:
                 continue
+
+            # Fill nulls and cast types (DuckDB returns decimal which doesn't support rolling_sum)
+            df_agg = df_agg.with_columns([
+                pl.col("avg_dom_imbalance").fill_null(0.5).cast(pl.Float64),
+                pl.col("total_delta").fill_null(0).cast(pl.Float64),
+            ])
 
             # Calculate rolling CVD
             window = cvd_windows[tf]
@@ -127,11 +184,17 @@ def update_orderflow_metrics():
             '1D': '1 day'
         }
 
+        # Determine time range to use
+        if tick_count > 0:
+            time_range = tick_range
+        else:
+            time_range = trade_range
+
         for tf in session_timeframes:
             print(f"\nProcessing {tf} (session-aligned)...")
             interval = session_intervals[tf]
 
-            # Get order_book bar timestamps within the mbp_ticks range
+            # Get order_book bar timestamps within the data range
             bars = storage.conn.execute(f"""
                 SELECT timestamp
                 FROM order_book
@@ -141,12 +204,12 @@ def update_orderflow_metrics():
                 ORDER BY timestamp
             """).fetchall()
 
-            print(f"  Found {len(bars)} {tf} bars in tick data range")
+            print(f"  Found {len(bars)} {tf} bars in data range")
 
             if len(bars) == 0:
                 continue
 
-            # For each bar, aggregate ticks within [bar_start, bar_start + interval)
+            # For each bar, aggregate data within [bar_start, bar_start + interval)
             updated = 0
             for i, (bar_ts,) in enumerate(bars):
                 # Calculate end of bar window
@@ -154,39 +217,61 @@ def update_orderflow_metrics():
                     SELECT '{bar_ts}'::TIMESTAMP + INTERVAL '{interval}'
                 """).fetchone()[0]
 
-                # Aggregate ticks within this bar's window (convert uint32 delta to signed)
-                agg = storage.conn.execute(f"""
-                    SELECT
-                        AVG(dom_imbalance) as avg_dom,
-                        SUM(CASE WHEN delta >= 2147483648 THEN delta - 4294967296 ELSE delta END) as total_delta,
-                        COUNT(*) as tick_count
-                    FROM mbp_ticks
-                    WHERE symbol = 'MNQ'
-                    AND timestamp >= '{bar_ts}'
-                    AND timestamp < '{bar_end}'
-                """).fetchone()
+                # Get DOM from mbp_ticks
+                avg_dom = 0.5
+                if tick_count > 0:
+                    dom_result = storage.conn.execute(f"""
+                        SELECT AVG(dom_imbalance)
+                        FROM mbp_ticks
+                        WHERE symbol = 'MNQ'
+                        AND timestamp >= '{bar_ts}'
+                        AND timestamp < '{bar_end}'
+                    """).fetchone()[0]
+                    if dom_result is not None:
+                        avg_dom = dom_result
 
-                if agg[2] > 0:  # Has ticks
-                    avg_dom, total_delta, tick_count = agg
-
-                    # For CVD, we need to sum delta from previous bars too
-                    # Get cumulative delta up to and including this bar
-                    window = cvd_windows[tf]
-                    window_start_idx = max(0, i - window + 1)
-
-                    if window_start_idx == 0:
-                        # Get earliest bar timestamp for window
-                        window_start_ts = bars[0][0]
-                    else:
-                        window_start_ts = bars[window_start_idx][0]
-
-                    cvd_result = storage.conn.execute(f"""
+                # Get delta for CVD calculation
+                if use_trades_for_cvd:
+                    delta_result = storage.conn.execute(f"""
+                        SELECT SUM(signed_size)
+                        FROM trades
+                        WHERE symbol = 'MNQ'
+                        AND timestamp >= '{bar_ts}'
+                        AND timestamp < '{bar_end}'
+                    """).fetchone()[0]
+                else:
+                    delta_result = storage.conn.execute(f"""
                         SELECT SUM(CASE WHEN delta >= 2147483648 THEN delta - 4294967296 ELSE delta END)
                         FROM mbp_ticks
                         WHERE symbol = 'MNQ'
-                        AND timestamp >= '{window_start_ts}'
+                        AND timestamp >= '{bar_ts}'
                         AND timestamp < '{bar_end}'
                     """).fetchone()[0]
+
+                total_delta = delta_result if delta_result is not None else 0
+
+                if total_delta != 0 or avg_dom != 0.5:
+                    # Calculate rolling CVD
+                    window = cvd_windows[tf]
+                    window_start_idx = max(0, i - window + 1)
+                    window_start_ts = bars[window_start_idx][0]
+
+                    if use_trades_for_cvd:
+                        cvd_result = storage.conn.execute(f"""
+                            SELECT SUM(signed_size)
+                            FROM trades
+                            WHERE symbol = 'MNQ'
+                            AND timestamp >= '{window_start_ts}'
+                            AND timestamp < '{bar_end}'
+                        """).fetchone()[0]
+                    else:
+                        cvd_result = storage.conn.execute(f"""
+                            SELECT SUM(CASE WHEN delta >= 2147483648 THEN delta - 4294967296 ELSE delta END)
+                            FROM mbp_ticks
+                            WHERE symbol = 'MNQ'
+                            AND timestamp >= '{window_start_ts}'
+                            AND timestamp < '{bar_end}'
+                        """).fetchone()[0]
 
                     cvd = cvd_result if cvd_result is not None else 0
 

@@ -64,6 +64,15 @@ orderflow_alpha:
   # LDR (Liquidity Depth Ratio) thresholds
   ldr_wall_threshold: 2.5     # Ratio for support/resistance wall detection
 
+  # CVD (Cumulative Volume Delta) thresholds
+  # CVD from trades shows true buying/selling pressure
+  # Positive CVD = net buying (bullish), Negative CVD = net selling (bearish)
+  cvd_threshold: 5000         # Significant CVD threshold for scoring (contracts)
+  # Scoring ranges:
+  # - Strong: |CVD| > 2x threshold = 90-100 score contribution
+  # - Moderate: |CVD| > threshold = 60-90 score contribution
+  # - Weak: |CVD| < threshold = 40-60 score contribution
+
   # Absorption detection
   absorption_volume_mult: 1.3  # Volume multiplier vs average
   absorption_lookback: 20

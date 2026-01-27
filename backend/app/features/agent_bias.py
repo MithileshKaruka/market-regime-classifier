@@ -78,12 +78,21 @@ class MarketIntensityScore:
 
 @dataclass
 class OrderFlowAlphaScore:
-    """Order Flow Alpha component (50% weight)"""
+    """Order Flow Alpha component (50% weight)
+
+    Components (20% each of this category):
+    - OBI: Order Book Imbalance
+    - LDR: Liquidity Depth Ratio
+    - Absorption: Absorption signals
+    - LSF: Liquidity Sweep Fade signals
+    - CVD: Cumulative Volume Delta from trades (true buying/selling pressure)
+    """
     score: float  # 0-100
-    obi_score: float  # 0-25
-    ldr_score: float  # 0-25
-    absorption_score: float  # 0-25
-    lsf_score: float  # 0-25
+    obi_score: float  # 0-20
+    ldr_score: float  # 0-20
+    absorption_score: float  # 0-20
+    lsf_score: float  # 0-20
+    cvd_score: float  # 0-20 (from trades data)
     active_signals: List[str]
     details: str
 
@@ -127,6 +136,7 @@ class AgentBiasCalculator:
 
         # Orderflow Alpha params
         self.ldr_wall_threshold = config.orderflow_alpha.ldr_wall_threshold
+        self.cvd_threshold = config.orderflow_alpha.cvd_threshold
 
         # Score thresholds
         self.thresholds = config.thresholds
@@ -361,16 +371,18 @@ class AgentBiasCalculator:
         ldr: Optional[float],        # Liquidity Depth Ratio
         absorption_signals: List[Dict],  # Recent absorption signals
         lsf_signals: List[Dict],         # Recent LSF signals
+        cvd: Optional[float] = None,     # Cumulative Volume Delta from trades
     ) -> OrderFlowAlphaScore:
         """Calculate Order Flow Alpha score (50% of total)
 
-        Components (25 points each):
+        Components (20 points each, 5 components = 100%):
         - OBI: Order Book Imbalance direction
         - LDR: Liquidity Depth Ratio (wall detection)
         - Absorption: Recent absorption signals
         - LSF: Recent liquidity sweep fade signals
+        - CVD: Cumulative Volume Delta (true buying/selling pressure from trades)
         """
-        # OBI Score (0-100 -> 0-25 contribution)
+        # OBI Score (0-100 -> 0-20 contribution)
         obi_score = 50.0
         if obi_ratio is not None:
             if obi_ratio >= self.ldr_wall_threshold:
@@ -388,7 +400,7 @@ class AgentBiasCalculator:
             else:
                 obi_score = 50
 
-        # LDR Score (0-100 -> 0-25 contribution)
+        # LDR Score (0-100 -> 0-20 contribution)
         ldr_score = 50.0
         if ldr is not None:
             if ldr >= self.ldr_wall_threshold:
@@ -406,7 +418,7 @@ class AgentBiasCalculator:
             else:
                 ldr_score = 50
 
-        # Absorption Score (0-100 -> 0-25 contribution)
+        # Absorption Score (0-100 -> 0-20 contribution)
         absorption_score = 50.0
         if absorption_signals:
             bullish_abs = sum(1 for s in absorption_signals if s.get("direction") == "BULLISH")
@@ -418,7 +430,7 @@ class AgentBiasCalculator:
                 net_ratio = (bullish_abs - bearish_abs) / total_abs
                 absorption_score = 50 + (net_ratio * 40)  # 10-90 range
 
-        # LSF Score (0-100 -> 0-25 contribution)
+        # LSF Score (0-100 -> 0-20 contribution)
         lsf_score = 50.0
         if lsf_signals:
             # LSF signals are reversal signals - very high conviction
@@ -432,9 +444,38 @@ class AgentBiasCalculator:
             else:
                 lsf_score = 50
 
-        # Combine scores (25% each)
-        total_score = (obi_score * 0.25) + (ldr_score * 0.25) + \
-                     (absorption_score * 0.25) + (lsf_score * 0.25)
+        # CVD Score (0-100 -> 0-20 contribution)
+        # CVD from trades shows true buying/selling pressure
+        # Positive CVD = net buying (bullish), Negative CVD = net selling (bearish)
+        cvd_score = 50.0
+        cvd_threshold = self.cvd_threshold  # From config
+        if cvd is not None and cvd != 0:
+            # Normalize CVD to a 0-100 score
+            # Strong positive CVD (>2x threshold) = 90-100
+            # Moderate positive CVD (>threshold) = 60-90
+            # Weak positive CVD = 50-60
+            # Weak negative CVD = 40-50
+            # Moderate negative CVD (<-threshold) = 10-40
+            # Strong negative CVD (<-2x threshold) = 0-10
+            if cvd >= cvd_threshold * 2:
+                cvd_score = 90 + min(10, (cvd - cvd_threshold * 2) / cvd_threshold * 10)
+            elif cvd >= cvd_threshold:
+                cvd_score = 60 + (cvd - cvd_threshold) / cvd_threshold * 30
+            elif cvd > 0:
+                cvd_score = 50 + cvd / cvd_threshold * 10
+            elif cvd <= -cvd_threshold * 2:
+                cvd_score = 10 - min(10, (abs(cvd) - cvd_threshold * 2) / cvd_threshold * 10)
+            elif cvd <= -cvd_threshold:
+                cvd_score = 40 - (abs(cvd) - cvd_threshold) / cvd_threshold * 30
+            else:  # cvd < 0
+                cvd_score = 50 - abs(cvd) / cvd_threshold * 10
+
+            # Clamp to 0-100
+            cvd_score = max(0, min(100, cvd_score))
+
+        # Combine scores (20% each - 5 components)
+        total_score = (obi_score * 0.20) + (ldr_score * 0.20) + \
+                     (absorption_score * 0.20) + (lsf_score * 0.20) + (cvd_score * 0.20)
 
         active_signals = []
         if obi_ratio and (obi_ratio > 1.3 or obi_ratio < 0.77):
@@ -445,15 +486,19 @@ class AgentBiasCalculator:
             active_signals.append(f"ABS({len(absorption_signals)})")
         if lsf_signals:
             active_signals.append(f"LSF({len(lsf_signals)})")
+        if cvd is not None and abs(cvd) >= cvd_threshold:
+            cvd_dir = "+" if cvd > 0 else ""
+            active_signals.append(f"CVD({cvd_dir}{int(cvd/1000)}k)")
 
-        details = f"OBI {obi_score:.0f} | LDR {ldr_score:.0f} | Abs {absorption_score:.0f} | LSF {lsf_score:.0f}"
+        details = f"OBI {obi_score:.0f} | LDR {ldr_score:.0f} | Abs {absorption_score:.0f} | LSF {lsf_score:.0f} | CVD {cvd_score:.0f}"
 
         return OrderFlowAlphaScore(
             score=round(total_score, 1),
-            obi_score=round(obi_score * 0.25, 1),
-            ldr_score=round(ldr_score * 0.25, 1),
-            absorption_score=round(absorption_score * 0.25, 1),
-            lsf_score=round(lsf_score * 0.25, 1),
+            obi_score=round(obi_score * 0.20, 1),
+            ldr_score=round(ldr_score * 0.20, 1),
+            absorption_score=round(absorption_score * 0.20, 1),
+            lsf_score=round(lsf_score * 0.20, 1),
+            cvd_score=round(cvd_score * 0.20, 1),
             active_signals=active_signals,
             details=details,
         )
@@ -468,6 +513,7 @@ class AgentBiasCalculator:
         ldr: Optional[float] = None,
         absorption_signals: Optional[List[Dict]] = None,
         lsf_signals: Optional[List[Dict]] = None,
+        cvd: Optional[float] = None,
     ) -> AgentBiasResult:
         """Calculate total agent bias score (0-100)
 
@@ -491,6 +537,7 @@ class AgentBiasCalculator:
             obi_ratio, ldr,
             absorption_signals or [],
             lsf_signals or [],
+            cvd=cvd,
         )
 
         # Calculate weighted total
