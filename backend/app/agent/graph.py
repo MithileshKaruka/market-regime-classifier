@@ -238,7 +238,7 @@ def decide_action(state: AgentState) -> AgentState:
     - WEAK_BULLISH: Cautious longs at S/R
     - HIGH_BULLISH: Aggressive longs, add to winners
     """
-    from app.config import get_config
+    from config import get_config
     config = get_config()
 
     bias_score = state.get("bias_score", 50)
@@ -350,7 +350,7 @@ def should_continue(state: AgentState) -> Literal["observe", "__end__"]:
     - We've taken a decisive action (entry/exit)
     - Max iterations reached (from config)
     """
-    from app.config import get_config
+    from config import get_config
     config = get_config()
 
     action = state.get("action", TradeAction.WAIT.value)

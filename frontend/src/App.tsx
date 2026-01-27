@@ -5,20 +5,17 @@ import RegimePanel from './components/RegimePanel'
 import OrderFlowMetrics from './components/OrderFlowMetrics'
 import AdvancedMetricsPanel from './components/AdvancedMetrics'
 import AgentPanel from './components/AgentPanel'
-
-type Timeframe = '5M' | '15M' | '1H' | '4H' | '1D'
+import { TIMEFRAMES, DEFAULT_TIMEFRAME, LABELS, type Timeframe } from './config'
 
 function App() {
-  const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>('1H')
-
-  const timeframes: Timeframe[] = ['5M', '15M', '1H', '4H', '1D']
+  const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>(DEFAULT_TIMEFRAME)
 
   return (
     <div className="app">
       <header className="header">
-        <h1>MNQ Regime Classifier</h1>
+        <h1>{LABELS.appTitle}</h1>
         <div className="timeframe-selector">
-          {timeframes.map((tf) => (
+          {TIMEFRAMES.map((tf) => (
             <button
               key={tf}
               className={`tf-button ${selectedTimeframe === tf ? 'active' : ''}`}

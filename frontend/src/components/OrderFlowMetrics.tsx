@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import './OrderFlowMetrics.css'
-import { API_BASE_URL } from '../config'
+import { API_CONFIG, COLORS, POLLING_INTERVALS, LABELS } from '../config'
 
 interface DOMSummary {
   timeframe: string
@@ -30,14 +30,14 @@ export default function OrderFlowMetrics({ timeframe }: OrderFlowMetricsProps) {
 
   useEffect(() => {
     fetchMetrics()
-    // Poll for updates every 2 seconds
-    const interval = setInterval(fetchMetrics, 2000)
+    // Poll for updates
+    const interval = setInterval(fetchMetrics, POLLING_INTERVALS.orderflowMetrics)
     return () => clearInterval(interval)
   }, [timeframe])
 
   const fetchMetrics = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/orderflow/metrics`)
+      const response = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.metrics}`)
       const data = await response.json()
       setMetrics(data)
       setLoading(false)
@@ -59,18 +59,18 @@ export default function OrderFlowMetrics({ timeframe }: OrderFlowMetricsProps) {
   }
 
   const vwap = metrics.daily_vwap
-  const vwapColor = vwap.position === 'ABOVE' ? '#10b981' : vwap.position === 'BELOW' ? '#ef4444' : '#6b7280'
+  const vwapColor = vwap.position === 'ABOVE' ? COLORS.bullish : vwap.position === 'BELOW' ? COLORS.bearish : COLORS.neutral
 
   return (
     <div className="orderflow-metrics">
-      <h3>Order Flow</h3>
+      <h3>{LABELS.panels.orderFlow}</h3>
 
       {/* DOM Imbalance by Timeframe */}
       <div className="dom-section">
         <div className="section-label">DOM Imbalance</div>
         <div className="dom-grid">
           {metrics.dom_by_timeframe.map((dom) => {
-            const domColor = dom.direction === 'BULLISH' ? '#10b981' : dom.direction === 'BEARISH' ? '#ef4444' : '#6b7280'
+            const domColor = dom.direction === 'BULLISH' ? COLORS.bullish : dom.direction === 'BEARISH' ? COLORS.bearish : COLORS.neutral
             const isSelected = dom.timeframe === timeframe
             return (
               <div
@@ -82,7 +82,7 @@ export default function OrderFlowMetrics({ timeframe }: OrderFlowMetricsProps) {
                 <div
                   className="dom-bar"
                   style={{
-                    background: `linear-gradient(to right, #ef4444 0%, #ef4444 ${(1 - dom.dom_imbalance) * 100}%, #10b981 ${(1 - dom.dom_imbalance) * 100}%, #10b981 100%)`,
+                    background: `linear-gradient(to right, ${COLORS.bearish} 0%, ${COLORS.bearish} ${(1 - dom.dom_imbalance) * 100}%, ${COLORS.bullish} ${(1 - dom.dom_imbalance) * 100}%, ${COLORS.bullish} 100%)`,
                   }}
                 >
                   <div
@@ -98,9 +98,9 @@ export default function OrderFlowMetrics({ timeframe }: OrderFlowMetricsProps) {
           })}
         </div>
         <div className="dom-legend">
-          <span style={{ color: '#ef4444' }}>Ask Heavy</span>
-          <span style={{ color: '#6b7280' }}>50%</span>
-          <span style={{ color: '#10b981' }}>Bid Heavy</span>
+          <span style={{ color: COLORS.bearish }}>Ask Heavy</span>
+          <span style={{ color: COLORS.neutral }}>50%</span>
+          <span style={{ color: COLORS.bullish }}>Bid Heavy</span>
         </div>
       </div>
 

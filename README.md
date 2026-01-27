@@ -1,15 +1,37 @@
 # Market Regime Classifier - MNQ Futures
 
-A multi-timeframe market regime analysis platform for Micro NQ (MNQ) futures using OHLCV data and order flow analysis.
+A multi-timeframe market regime analysis platform for Micro NQ (MNQ) futures using OHLCV data, order book analysis, and trade flow signals.
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 - Python 3.12+
 - Node.js 18+
-- Databento API key
+- Databento API key (for data ingestion)
 
-### 1. Start Backend
+### 1. Backend Setup
+```bash
+cd backend
+python -m venv venv
+source venv/bin/activate  # or `venv\Scripts\activate` on Windows
+pip install -r requirements.txt
+```
+
+### 2. Load Data
+```bash
+cd backend
+python scripts/load_all_data.py --all
+```
+
+This runs the complete data pipeline:
+- Load OHLCV candlestick data
+- Load MBP tick data (DOM imbalance)
+- Load trades data (CVD/delta)
+- Update order flow metrics
+
+See [backend/data/README.md](backend/data/README.md) for detailed data ingestion steps.
+
+### 3. Start Backend
 ```bash
 cd backend
 python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
@@ -17,33 +39,16 @@ python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 Backend available at: **http://localhost:8000**
 
-### 2. Start Frontend
+### 4. Start Frontend
 ```bash
 cd frontend
+npm install
 npm run dev
 ```
 
 Frontend available at: **http://localhost:5173**
 
-## 📊 Current Status
-
-### Data Loaded
-- **Period**: January 2021 - January 2026 (5 years)
-- **Source**: Databento OHLCV-1M schema
-- **Total Bars**: 2.8M 1-minute bars
-- **Clean Data**: 19.4K 1H bars (after filtering outliers)
-
-### Timeframes Available
-| Timeframe | Total Bars | Clean Bars | Coverage |
-|-----------|------------|------------|----------|
-| 1M        | 1,768,910  | TBD        | 5 years  |
-| 5M        | 353,784    | TBD        | 5 years  |
-| 15M       | 117,928    | TBD        | 5 years  |
-| 1H        | 29,520     | 19,468     | 2.2 years|
-| 4H        | 8,002      | 3,322      | 5 years  |
-| 1D        | 1,557      | 203        | 5 years  |
-
-## 🏗️ Architecture
+## Architecture
 
 ### Tech Stack
 - **Backend**: FastAPI + Python
@@ -52,46 +57,148 @@ Frontend available at: **http://localhost:5173**
 - **Data Processing**: Polars (high-performance DataFrames)
 - **Charts**: TradingView Lightweight Charts
 - **Data Source**: Databento (CME MDP 3.0)
+- **Agent Framework**: LangGraph (for trading decisions)
 
 ### Directory Structure
 ```
 market-regime-classifier/
 ├── backend/
 │   ├── app/
-│   │   ├── api/          # FastAPI endpoints
-│   │   ├── data/         # Database storage layer
-│   │   ├── features/     # Indicators & order flow
-│   │   └── classifiers/  # Regime classification logic
-│   ├── scripts/          # Data loading & maintenance
-│   └── data/             # DuckDB database (295MB)
+│   │   ├── api/           # FastAPI endpoints
+│   │   ├── agent/         # LangGraph trading agent
+│   │   ├── classifiers/   # Regime classification
+│   │   ├── data/          # Database storage layer
+│   │   ├── features/      # Indicators & order flow
+│   │   ├── services/      # Storage services
+│   │   └── streaming/     # Live data ingestion
+│   ├── config/            # Centralized configuration
+│   │   ├── config.py      # Dataclass definitions
+│   │   └── agent_config.yaml  # All tunable parameters
+│   ├── scripts/           # Data loading & maintenance
+│   └── data/              # DuckDB database & raw data files
 ├── frontend/
 │   └── src/
-│       ├── components/   # React components
-│       └── config.ts     # API configuration
+│       ├── components/    # React components
+│       └── config.ts      # API configuration
 └── README.md
 ```
 
-## 📡 API Endpoints
+## Features
+
+### Order Flow Analysis
+- **DOM Imbalance**: Real-time order book imbalance from MBP-1/MBP-10 data
+- **CVD (Cumulative Volume Delta)**: Rolling window CVD from actual trade executions
+- **RVOL**: Relative Volume with Point of Control (POC)
+- **VPIN**: Volume-Synchronized Probability of Informed Trading
+- **LDR**: Liquidity Depth Ratio for wall detection
+
+### Signal Detection
+- **Absorption**: Large volume absorbed at stable price levels
+- **LSF (Liquidity Sweep Fade)**: Stop run followed by snap-back reversals
+- **OBI (Order Book Imbalance)**: Weighted imbalance across order book levels
+
+### Bias Scoring System (0-100)
+Combines three signal categories into a unified trading bias:
+
+| Category | Weight | Components |
+|----------|--------|------------|
+| Trend & Structure | 20% | EMA crossovers, market structure (HH/HL vs LH/LL), S/R levels |
+| Market Intensity | 30% | RVOL (volume conviction) + VPIN (informed trading) |
+| Order Flow Alpha | 50% | OBI, LDR, Absorption, LSF signals |
+
+### Score Interpretation
+| Score Range | Mode | Action |
+|-------------|------|--------|
+| 0-30 | HIGH_BEARISH | Short entries only, ignore support bounces |
+| 30-45 | WEAK_BEARISH | Exit longs, don't enter shorts yet |
+| 45-55 | NEUTRAL | Wait mode, avoid trading |
+| 55-70 | WEAK_BULLISH | Cautious longs at proven S/R only |
+| 70-100 | HIGH_BULLISH | Aggressive longs, buy breakouts |
+
+### Technical Indicators
+- VWAP and Rolling VWAP (7, 30, 90, 200 periods)
+- EMA (12, 25, 20, 50, 100, 200 periods)
+- Bollinger Bands
+- ATR (Average True Range)
+- Support/Resistance levels with touch counts
+
+### Multi-Timeframe Support
+| Timeframe | CVD Window | Use Case |
+|-----------|------------|----------|
+| 5M | 288 bars (24h) | Intraday scalping |
+| 15M | 96 bars (24h) | Intraday swing |
+| 1H | 24 bars (24h) | Day trading |
+| 4H | 30 bars (5d) | Swing trading |
+| 1D | 5 bars (5d) | Position trading |
+
+## Configuration
+
+All parameters are centralized in `backend/config/agent_config.yaml`. Key sections:
+
+### Scoring Weights
+```yaml
+scoring:
+  trend_structure_weight: 20
+  market_intensity_weight: 30
+  orderflow_alpha_weight: 50
+```
+
+### Order Flow Thresholds
+```yaml
+orderflow_alpha:
+  obi_strong_imbalance: 1.5
+  obi_moderate_imbalance: 1.2
+  cvd_threshold: 5000
+  absorption_volume_mult: 1.3
+  lsf_spike_mult: 1.5
+```
+
+### Instrument Settings
+```yaml
+instrument:
+  symbol: MNQ
+  tick_size: 0.25
+  min_price: 18000
+  max_price: 32000
+```
+
+See [backend/config/agent_config.yaml](backend/config/agent_config.yaml) for all available parameters.
+
+## API Endpoints
 
 ### Chart Data
 ```
 GET /api/v2/chart/{timeframe}?limit=5000&offset=0&indicators=ema_20,ema_50
 ```
 
-**Parameters:**
-- `timeframe`: 5M, 15M, 1H, 4H, 1D
-- `limit`: Number of bars (default: 5000, max: 10000)
-- `offset`: Pagination offset (default: 0)
-- `indicators`: Comma-separated list (ema_20, ema_50, ema_100, ema_200, rvwap_7, etc.)
+### Order Flow Features
+```
+GET /api/features/{timeframe}
+```
 
-**Response:**
-```json
-{
-  "bars": [...],
-  "total_count": 19468,
-  "returned_count": 5000,
-  "offset": 0
-}
+### Orderflow Signals
+```
+GET /api/orderflow/signals/{timeframe}
+GET /api/orderflow/advanced/{timeframe}
+GET /api/orderflow/agent-bias/{timeframe}
+```
+
+### Regime Classification
+```
+GET /api/regime/current
+GET /api/regime/{timeframe}
+GET /api/regime/history/{timeframe}?limit=100
+```
+
+### Support/Resistance
+```
+GET /api/regime/support-resistance/{timeframe}
+GET /api/regime/signals/{timeframe}
+```
+
+### Trading Agent
+```
+GET /api/orderflow/agent/{timeframe}?position=FLAT
 ```
 
 ### Health Check
@@ -99,161 +206,104 @@ GET /api/v2/chart/{timeframe}?limit=5000&offset=0&indicators=ema_20,ema_50
 GET /api/health
 ```
 
-### Regime Data
-```
-GET /api/regime/latest/{timeframe}
-GET /api/regime/history/{timeframe}?limit=100
-```
+## Data Pipeline
 
-## 🛠️ Development
+### Historical Data
+1. **OHLCV**: Candlestick data from Databento OHLCV-1M schema
+2. **MBP**: Order book data (MBP-1 for live, MBP-10 for historical)
+3. **Trades**: Individual trade executions with aggressor side
 
-### Backend Setup
-```bash
-cd backend
-python -m venv venv
-source venv/bin/activate  # or `venv\Scripts\activate` on Windows
-pip install -r requirements.txt
+### Live Streaming
+```python
+# Subscribes to both schemas for real-time data
+client.subscribe(dataset="GLBX.MDP3", schema="mbp-1", symbols=["MNQ"])
+client.subscribe(dataset="GLBX.MDP3", schema="trades", symbols=["MNQ"])
 ```
 
-### Frontend Setup
-```bash
-cd frontend
-npm install
-```
+See [backend/data/README.md](backend/data/README.md) for complete data ingestion documentation.
 
-### Load Historical Data
-```bash
-cd backend
-python scripts/load_ohlcv.py
-```
-
-This loads the 5-year OHLCV dataset from the DBN file located at:
-`backend/data/glbx-mdp3-20210116-20260115.ohlcv-1m.dbn.zst`
-
-## 📈 Features
-
-### Implemented ✅
-- ✅ OHLCV chart display (5 years of data)
-- ✅ Multi-timeframe support (1M, 5M, 15M, 1H, 4H, 1D)
-- ✅ Price filtering (removes settlement artifacts)
-- ✅ Pagination support (up to 10k bars per request)
-- ✅ Technical indicators (EMA, RVWAP)
-- ✅ Clean data storage in DuckDB
-
-### In Progress 🚧
-- 🚧 CVD (Cumulative Volume Delta) from trades data
-- 🚧 Regime classification (bullish/bearish/neutral)
-- 🚧 Support/Resistance level detection
-- 🚧 Lazy loading for chart (infinite scroll)
-
-### Planned 📋
-- 📋 Real-time MBP-10 order book data
-- 📋 DOM (Depth of Market) imbalance
-- 📋 Order flow-based signals
-- 📋 Multi-timeframe regime alignment
-- 📋 Automated trading signals
-
-## 🗄️ Database Schema
+## Database Schema
 
 ### `order_book` Table
-```sql
-CREATE TABLE order_book (
-    timestamp TIMESTAMP,
-    symbol VARCHAR,
-    timeframe VARCHAR,
-    open DOUBLE,
-    high DOUBLE,
-    low DOUBLE,
-    close DOUBLE,
-    volume BIGINT,
-    dom_imbalance DOUBLE,  -- Placeholder for real-time data
-    cvd DOUBLE,            -- Will calculate from trades
-    vwap DOUBLE,
-    PRIMARY KEY (timestamp, symbol, timeframe)
-)
-```
+| Column | Type | Description |
+|--------|------|-------------|
+| timestamp | TIMESTAMP | Bar start time |
+| symbol | VARCHAR | Instrument symbol (MNQ) |
+| timeframe | VARCHAR | Timeframe (5M, 15M, 1H, 4H, 1D) |
+| open/high/low/close | DOUBLE | OHLC prices |
+| volume | BIGINT | Bar volume |
+| dom_imbalance | DOUBLE | Order book imbalance (0-1) |
+| cvd | DOUBLE | Rolling Cumulative Volume Delta |
+| vwap | DOUBLE | Volume-Weighted Average Price |
 
 ### `regimes` Table
-```sql
-CREATE TABLE regimes (
-    timestamp TIMESTAMP,
-    symbol VARCHAR,
-    timeframe VARCHAR,
-    regime VARCHAR,         -- BULLISH, BEARISH, NEUTRAL
-    confidence DOUBLE,
-    key_signal VARCHAR,
-    dom_imbalance DOUBLE,
-    cvd DOUBLE,
-    vwap DOUBLE,
-    price DOUBLE,
-    PRIMARY KEY (timestamp, symbol, timeframe)
-)
-```
+| Column | Type | Description |
+|--------|------|-------------|
+| timestamp | TIMESTAMP | Classification time |
+| regime | VARCHAR | BULLISH, BEARISH, NEUTRAL |
+| confidence | DOUBLE | Classification confidence |
+| key_signal | VARCHAR | Primary signal driver |
 
-## 🐛 Troubleshooting
+### `trades` Table
+| Column | Type | Description |
+|--------|------|-------------|
+| timestamp | TIMESTAMP | Trade timestamp |
+| price | DOUBLE | Trade price |
+| size | INTEGER | Trade size |
+| side | VARCHAR | Aggressor ('A' = buy, 'B' = sell) |
 
-### Backend Issues
+## Development
 
-**Backend won't start?**
+### Running Tests
 ```bash
 cd backend
-pip install -r requirements.txt
+pytest
 ```
 
-**Database errors?**
-```bash
-cd backend
-python scripts/reset_database.py
-python scripts/load_ohlcv.py
-```
-
-**Check database contents:**
+### Verifying Data
 ```bash
 cd backend
 python scripts/verify_data.py
 ```
 
-### Frontend Issues
-
-**Frontend won't start?**
+### Database Status
 ```bash
-cd frontend
-npm install
+cd backend
+python scripts/load_all_data.py --status
 ```
 
-**Chart not showing data?**
-1. Ensure backend is running at http://localhost:8000
-2. Check browser console for API errors
-3. Hard refresh browser (Ctrl+Shift+R)
+## Troubleshooting
 
-**Charts show compressed/weird prices?**
-- Backend filters outliers (prices < $1000 or > $30000)
-- This is normal - settlement artifacts are removed
-- Valid MNQ range over 5 years: ~$10k-$30k
+### No Order Flow Signals?
+Make sure to run the orderflow metrics update after loading data:
+```bash
+python scripts/update_orderflow_metrics.py
+```
 
-## 📝 Notes
+### Price Data Looks Wrong?
+The system filters settlement artifacts. Valid MNQ range is configured in `config/agent_config.yaml`:
+```yaml
+instrument:
+  min_price: 18000
+  max_price: 32000
+```
 
-### Data Quality
-- **Outliers removed**: Settlement/rollover artifacts create extreme low values (~$225)
-- **Filter applied**: All OHLC values must be > $1000 and < $30000
-- **Result**: Clean, tradeable price data
+### Backend Won't Start?
+```bash
+cd backend
+pip install -r requirements.txt
+```
 
-### Performance
-- **API limit**: 5000 bars default, 10000 max per request
-- **Database size**: ~295MB for 5 years of multi-timeframe data
-- **Response time**: < 1s for 5000 bars with indicators
+### Check Configuration
+```bash
+cd backend
+python -c "from config import get_config; c = get_config(); print(f'Symbol: {c.instrument.symbol}')"
+```
 
-### Next Phase: CVD Calculation
-To enable true order flow analysis:
-1. Download `trades` DBN file (same date range)
-2. Calculate CVD from trade sides (buyer vs seller initiated)
-3. Update database with actual CVD values
-4. Enable CVD-based regime classification
-
-## 📄 License
+## License
 
 MIT
 
-## 🤝 Contributing
+## Contributing
 
 This is a personal project, but feedback and suggestions are welcome!

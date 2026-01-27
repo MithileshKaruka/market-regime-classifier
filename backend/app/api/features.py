@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 from app.data.storage import DuckDBStorage
+from config import get_config
 
 router = APIRouter()
 
@@ -32,10 +33,12 @@ async def get_features(
         row = df.row(0, named=True)
 
         # Determine liquidity description based on DOM imbalance
+        config = get_config()
+        dom_threshold = config.regime.thresholds.dom_threshold
         dom = row.get("dom_imbalance", 0.5)
-        if dom > 0.55:
+        if dom > dom_threshold:
             liquidity_desc = "Heavy Bid"
-        elif dom < 0.45:
+        elif dom < (1 - dom_threshold):
             liquidity_desc = "Heavy Ask"
         else:
             liquidity_desc = "Balanced"

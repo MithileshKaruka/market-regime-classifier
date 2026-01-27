@@ -9,22 +9,36 @@ This module identifies key support and resistance levels using:
 
 import polars as pl
 import logging
-from typing import List, Dict
+from typing import List, Dict, Optional
+
+from config import get_config
 
 logger = logging.getLogger(__name__)
 
 
 class SupportResistanceDetector:
-    """Detect support and resistance levels from OHLC data"""
+    """Detect support and resistance levels from OHLC data
 
-    def __init__(self, price_tolerance: float = 0.002):
+    All parameters can be overridden, but defaults are loaded from config.
+    """
+
+    def __init__(self, price_tolerance: Optional[float] = None):
         """
         Initialize the detector
 
         Args:
-            price_tolerance: Percentage tolerance for clustering levels (default 0.2%)
+            price_tolerance: Percentage tolerance for clustering levels
+                            (default from config)
         """
-        self.price_tolerance = price_tolerance
+        # Load defaults from config
+        config = get_config()
+        sr_config = config.support_resistance
+
+        self.price_tolerance = price_tolerance or sr_config.proximity_pct
+        self._min_touches = sr_config.min_touches
+        self._swing_window = sr_config.swing_window
+        self._volume_bins = sr_config.volume_profile_bins
+        self._volume_top_n = sr_config.volume_profile_top_n
 
     def find_swing_points(self, df: pl.DataFrame, window: int = 5) -> pl.DataFrame:
         """
@@ -164,8 +178,8 @@ class SupportResistanceDetector:
     def identify_levels(
         self,
         df: pl.DataFrame,
-        min_touches: int = 2,
-        swing_window: int = 5,
+        min_touches: Optional[int] = None,
+        swing_window: Optional[int] = None,
     ) -> Dict:
         """
         Identify support and resistance levels
@@ -178,6 +192,10 @@ class SupportResistanceDetector:
         Returns:
             Dictionary with resistance and support levels (includes last_seen timestamp)
         """
+        # Use config defaults if not provided
+        min_touches = min_touches or self._min_touches
+        swing_window = swing_window or self._swing_window
+
         logger.info(f"Identifying S/R levels from {len(df)} bars")
 
         # Find swing points
@@ -225,8 +243,8 @@ class SupportResistanceDetector:
         self,
         df: pl.DataFrame,
         levels: Dict,
-        num_bins: int = 50,
-        top_n: int = 3,
+        num_bins: Optional[int] = None,
+        top_n: Optional[int] = None,
     ) -> Dict:
         """
         Add high volume nodes as additional S/R levels
@@ -234,12 +252,16 @@ class SupportResistanceDetector:
         Args:
             df: DataFrame with OHLC and volume data
             levels: Existing S/R levels dictionary
-            num_bins: Number of price bins for volume profile
-            top_n: Number of top volume nodes to include
+            num_bins: Number of price bins for volume profile (default from config)
+            top_n: Number of top volume nodes to include (default from config)
 
         Returns:
             Updated levels dictionary with volume profile levels
         """
+        # Use config defaults if not provided
+        num_bins = num_bins or self._volume_bins
+        top_n = top_n or self._volume_top_n
+
         logger.info("Adding volume profile levels")
 
         # Calculate price range

@@ -1,5 +1,14 @@
 import { useState, useEffect } from 'react'
 import './AgentPanel.css'
+import {
+  API_CONFIG,
+  COLORS,
+  SCORE_WEIGHTS,
+  THRESHOLDS,
+  getModeColor,
+  getActionColor,
+  getScoreGradient,
+} from '../config'
 
 interface AgentDecision {
   timestamp: number
@@ -73,8 +82,8 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
     try {
       // Fetch both agent decision and detailed bias in parallel
       const [agentRes, biasRes] = await Promise.all([
-        fetch(`http://localhost:8000/api/orderflow/agent/${timeframe}?position=${position}`),
-        fetch(`http://localhost:8000/api/orderflow/agent-bias/${timeframe}`)
+        fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.agentDecision}/${timeframe}?position=${position}`),
+        fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.agentBias}/${timeframe}`)
       ])
 
       if (!agentRes.ok) throw new Error('Failed to fetch agent decision')
@@ -95,33 +104,6 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
   useEffect(() => {
     fetchAgentDecision()
   }, [timeframe])
-
-  const getModeColor = (mode: string): string => {
-    switch (mode) {
-      case 'HIGH_BULLISH': return '#22c55e'
-      case 'WEAK_BULLISH': return '#86efac'
-      case 'NEUTRAL': return '#fbbf24'
-      case 'WEAK_BEARISH': return '#fca5a5'
-      case 'HIGH_BEARISH': return '#ef4444'
-      default: return '#94a3b8'
-    }
-  }
-
-  const getActionColor = (action: string): string => {
-    if (action.includes('LONG') && !action.includes('EXIT')) return '#22c55e'
-    if (action.includes('SHORT') && !action.includes('EXIT')) return '#ef4444'
-    if (action.includes('EXIT')) return '#f97316'
-    return '#94a3b8'
-  }
-
-  const getScoreGradient = (score: number): string => {
-    // 0-30: red, 30-45: orange, 45-55: yellow, 55-70: light green, 70-100: green
-    if (score <= 30) return `linear-gradient(90deg, #ef4444 ${score}%, #1e293b ${score}%)`
-    if (score <= 45) return `linear-gradient(90deg, #f97316 ${score}%, #1e293b ${score}%)`
-    if (score <= 55) return `linear-gradient(90deg, #fbbf24 ${score}%, #1e293b ${score}%)`
-    if (score <= 70) return `linear-gradient(90deg, #86efac ${score}%, #1e293b ${score}%)`
-    return `linear-gradient(90deg, #22c55e ${score}%, #1e293b ${score}%)`
-  }
 
   if (error) {
     return (
@@ -227,39 +209,39 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
           {/* Component Scores */}
           <div className="component-scores">
             <div className="score-row">
-              <span className="score-label">Trend (20%)</span>
+              <span className="score-label">{SCORE_WEIGHTS.trend.label} ({SCORE_WEIGHTS.trend.weight}%)</span>
               <div className="score-bar-container">
                 <div
                   className="score-bar"
                   style={{
                     width: `${decision.trend_score}%`,
-                    backgroundColor: decision.trend_score >= 50 ? '#22c55e' : '#ef4444'
+                    backgroundColor: decision.trend_score >= THRESHOLDS.score.midpoint ? COLORS.bullishLight : COLORS.bearish
                   }}
                 />
               </div>
               <span className="score-num">{decision.trend_score.toFixed(0)}</span>
             </div>
             <div className="score-row">
-              <span className="score-label">Intensity (30%)</span>
+              <span className="score-label">{SCORE_WEIGHTS.intensity.label} ({SCORE_WEIGHTS.intensity.weight}%)</span>
               <div className="score-bar-container">
                 <div
                   className="score-bar"
                   style={{
                     width: `${decision.intensity_score}%`,
-                    backgroundColor: decision.intensity_score >= 50 ? '#22c55e' : '#ef4444'
+                    backgroundColor: decision.intensity_score >= THRESHOLDS.score.midpoint ? COLORS.bullishLight : COLORS.bearish
                   }}
                 />
               </div>
               <span className="score-num">{decision.intensity_score.toFixed(0)}</span>
             </div>
             <div className="score-row">
-              <span className="score-label">Orderflow (50%)</span>
+              <span className="score-label">{SCORE_WEIGHTS.orderflow.label} ({SCORE_WEIGHTS.orderflow.weight}%)</span>
               <div className="score-bar-container">
                 <div
                   className="score-bar"
                   style={{
                     width: `${decision.orderflow_score}%`,
-                    backgroundColor: decision.orderflow_score >= 50 ? '#22c55e' : '#ef4444'
+                    backgroundColor: decision.orderflow_score >= THRESHOLDS.score.midpoint ? COLORS.bullishLight : COLORS.bearish
                   }}
                 />
               </div>
@@ -314,10 +296,10 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
             <div className="reasoning-section">
               <div className="section-header">
                 <span className="section-title">Trend & Structure</span>
-                <span className="section-weight">20%</span>
+                <span className="section-weight">{SCORE_WEIGHTS.trend.weight}%</span>
                 <span
                   className="section-score"
-                  style={{ color: biasDetails.trend_structure.score >= 50 ? '#22c55e' : '#ef4444' }}
+                  style={{ color: biasDetails.trend_structure.score >= THRESHOLDS.score.midpoint ? COLORS.bullishLight : COLORS.bearish }}
                 >
                   {biasDetails.trend_structure.score.toFixed(0)}
                 </span>
@@ -345,10 +327,10 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
             <div className="reasoning-section">
               <div className="section-header">
                 <span className="section-title">Market Intensity</span>
-                <span className="section-weight">30%</span>
+                <span className="section-weight">{SCORE_WEIGHTS.intensity.weight}%</span>
                 <span
                   className="section-score"
-                  style={{ color: biasDetails.market_intensity.score >= 50 ? '#22c55e' : '#ef4444' }}
+                  style={{ color: biasDetails.market_intensity.score >= THRESHOLDS.score.midpoint ? COLORS.bullishLight : COLORS.bearish }}
                 >
                   {biasDetails.market_intensity.score.toFixed(0)}
                 </span>
@@ -376,10 +358,10 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
             <div className="reasoning-section">
               <div className="section-header">
                 <span className="section-title">Orderflow Alpha</span>
-                <span className="section-weight">50%</span>
+                <span className="section-weight">{SCORE_WEIGHTS.orderflow.weight}%</span>
                 <span
                   className="section-score"
-                  style={{ color: biasDetails.orderflow_alpha.score >= 50 ? '#22c55e' : '#ef4444' }}
+                  style={{ color: biasDetails.orderflow_alpha.score >= THRESHOLDS.score.midpoint ? COLORS.bullishLight : COLORS.bearish }}
                 >
                   {biasDetails.orderflow_alpha.score.toFixed(0)}
                 </span>

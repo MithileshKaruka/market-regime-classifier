@@ -193,6 +193,31 @@ This provides:
 - Accurate CVD from trade aggressor side
 - Lower data costs (MBP-1 vs MBP-10)
 
+### Streaming Configuration
+
+Streaming parameters are centralized in `config/agent_config.yaml`:
+
+```yaml
+streaming:
+  dataset: GLBX.MDP3
+  default_symbols:
+    - MNQ
+  default_timeframes:
+    - 5M
+    - 15M
+    - 1H
+    - 4H
+    - 1D
+  flush_interval_seconds: 1.0
+  dom_smoothing_factor: 0.9
+```
+
+Start live streaming with:
+```bash
+cd backend
+DATABENTO_API_KEY=your_key python -m app.streaming.live_ingestion
+```
+
 ## CVD Configuration
 
 CVD (Cumulative Volume Delta) uses rolling windows defined in `config/agent_config.yaml`:

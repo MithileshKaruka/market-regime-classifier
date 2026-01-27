@@ -1,8 +1,10 @@
 """Order flow calculations from MBP-1 and Trades data"""
 import logging
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 import polars as pl
 import numpy as np
+
+from config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -12,29 +14,32 @@ class OrderFlowCalculator:
 
     Supports both MBP-1 (top of book) and MBP-10 (10 levels) for backwards compatibility.
     For live streaming, MBP-1 is used. For historical analysis, MBP-10 may be available.
+
+    All parameters can be overridden, but defaults are loaded from config.
     """
 
     def __init__(
         self,
-        cvd_window_config: dict = None,
+        cvd_window_config: Optional[Dict[str, int]] = None,
         levels: int = 1
     ):
         """Initialize calculator
 
         Args:
             cvd_window_config: Dict mapping timeframe to CVD rolling window size
-                              Default: {'5M': 288, '15M': 96, '1H': 24, '4H': 30, '1D': 5}
+                              (defaults loaded from config)
             levels: Number of order book levels (1 for MBP-1, 10 for MBP-10)
         """
         self.levels = levels
-        # Default CVD rolling window sizes (roughly 24 hours for intraday, 5 days for daily)
-        self.cvd_window_config = cvd_window_config or {
-            '5M': 288,   # 24 hours (288 * 5min = 1440min = 24h)
-            '15M': 96,   # 24 hours (96 * 15min = 1440min = 24h)
-            '1H': 24,    # 24 hours (24 * 1h = 24h)
-            '4H': 30,    # 5 days (30 * 4h = 120h = 5 days)
-            '1D': 5,     # 5 days
-        }
+
+        # Load defaults from config if not provided
+        config = get_config()
+        self.cvd_window_config = cvd_window_config or config.regime.cvd_windows
+
+        # Store instrument config for price filtering
+        self._min_price = config.instrument.min_price
+        self._max_price = config.instrument.max_price
+
         logger.info(f"OrderFlowCalculator initialized with {levels} levels, CVD windows: {self.cvd_window_config}")
 
     def calculate_dom_imbalance(
@@ -147,11 +152,10 @@ class OrderFlowCalculator:
         ])
 
         # Filter out records with null mid_price OR prices outside reasonable instrument range
-        # For MNQ: typical range is 18,000-32,000 (allows for market moves)
         df = df.filter(
             pl.col("mid_price").is_not_null() &
-            (pl.col("mid_price") >= 18000) &
-            (pl.col("mid_price") <= 32000)
+            (pl.col("mid_price") >= self._min_price) &
+            (pl.col("mid_price") <= self._max_price)
         )
 
         logger.info(f"After filtering invalid prices: {len(df)} records remain")

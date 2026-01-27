@@ -6,6 +6,8 @@ from enum import Enum
 import polars as pl
 import numpy as np
 
+from config import get_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -69,27 +71,36 @@ class OrderflowDashboard:
 
 
 class OrderflowMetricsCalculator:
-    """Calculates advanced orderflow metrics"""
+    """Calculates advanced orderflow metrics
+
+    All parameters can be overridden, but defaults are loaded from config.
+    """
 
     def __init__(
         self,
-        rvol_lookback: int = 20,
-        rvol_high_threshold: float = 1.5,
-        rvol_low_threshold: float = 0.5,
-        vpin_bucket_size: int = 50,  # Volume per bucket
-        vpin_num_buckets: int = 50,  # Number of buckets for rolling calculation
-        vpin_alert_threshold: float = 0.7,
-        ldr_wall_threshold: float = 2.5,  # 2.5:1 ratio for "wall" detection
-        poc_lookback: int = 100,  # Bars to look back for POC
+        rvol_lookback: Optional[int] = None,
+        rvol_high_threshold: Optional[float] = None,
+        rvol_low_threshold: Optional[float] = None,
+        vpin_bucket_size: Optional[int] = None,
+        vpin_num_buckets: Optional[int] = None,
+        vpin_alert_threshold: Optional[float] = None,
+        ldr_wall_threshold: Optional[float] = None,
+        poc_lookback: Optional[int] = None,
     ):
-        self.rvol_lookback = rvol_lookback
-        self.rvol_high_threshold = rvol_high_threshold
-        self.rvol_low_threshold = rvol_low_threshold
-        self.vpin_bucket_size = vpin_bucket_size
-        self.vpin_num_buckets = vpin_num_buckets
-        self.vpin_alert_threshold = vpin_alert_threshold
-        self.ldr_wall_threshold = ldr_wall_threshold
-        self.poc_lookback = poc_lookback
+        # Load defaults from config
+        config = get_config()
+        mi_config = config.market_intensity
+        of_config = config.orderflow_alpha
+
+        # Use provided values or fall back to config defaults
+        self.rvol_lookback = rvol_lookback or mi_config.rvol_lookback
+        self.rvol_high_threshold = rvol_high_threshold or mi_config.rvol_high
+        self.rvol_low_threshold = rvol_low_threshold or mi_config.rvol_low
+        self.vpin_bucket_size = vpin_bucket_size or mi_config.vpin_buckets
+        self.vpin_num_buckets = vpin_num_buckets or mi_config.vpin_num_buckets
+        self.vpin_alert_threshold = vpin_alert_threshold or mi_config.vpin_alert
+        self.ldr_wall_threshold = ldr_wall_threshold or of_config.ldr_wall_threshold
+        self.poc_lookback = poc_lookback or mi_config.poc_lookback
 
     def calculate_rvol(self, df: pl.DataFrame) -> Optional[RVOLMetrics]:
         """Calculate Relative Volume with POC context
@@ -147,7 +158,8 @@ class OrderflowMetricsCalculator:
 
         # Create price buckets and find highest volume price
         # Round prices to tick size for grouping
-        tick_size = 0.25  # MNQ tick size
+        config = get_config()
+        tick_size = config.instrument.tick_size
 
         # Group by rounded close price and sum volume
         volume_by_price = today_df.with_columns([

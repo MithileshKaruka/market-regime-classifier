@@ -1,7 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
 import { createChart } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi } from 'lightweight-charts'
-import { API_BASE_URL } from '../config'
+import {
+  API_CONFIG,
+  COLORS,
+  CHART_CONFIG,
+  THRESHOLDS,
+  TIMEFRAMES as CONFIG_TIMEFRAMES,
+  INDICATORS,
+  ALL_INDICATOR_KEYS,
+  AVAILABLE_INDICATORS,
+  LABELS,
+  type Timeframe,
+} from '../config'
 import './ChartView.css'
 
 interface ChartBar {
@@ -45,14 +56,10 @@ interface OrderflowSignal {
   details: string
 }
 
-type Timeframe = '5M' | '15M' | '1H' | '4H' | '1D'
-
 interface ChartViewProps {
   timeframe: string
   onTimeframeChange?: (tf: Timeframe) => void
 }
-
-const TIMEFRAMES: Timeframe[] = ['5M', '15M', '1H', '4H', '1D']
 
 export default function ChartView({ timeframe, onTimeframeChange }: ChartViewProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null)
@@ -64,7 +71,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
   const [loading, setLoading] = useState(true)
   const [selectedIndicators, setSelectedIndicators] = useState<string[]>([])
   const [showIndicatorMenu, setShowIndicatorMenu] = useState(false)
-  const [priceRangePct, setPriceRangePct] = useState<number>(10)
+  const [priceRangePct, setPriceRangePct] = useState<number>(THRESHOLDS.srRange.default)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [isDarkBackground, setIsDarkBackground] = useState(true)
   const [showOrderflowSignals, setShowOrderflowSignals] = useState(true)
@@ -78,8 +85,6 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
   const loadedBarsRef = useRef<ChartBar[]>([])  // Ref to avoid stale closure
   const totalBarsRef = useRef<number>(0)
   const isLoadingMoreRef = useRef<boolean>(false)
-  const INITIAL_LOAD = 1000  // Initial bars to load
-  const LOAD_MORE_SIZE = 500 // Bars to load when scrolling back
 
   // Keep refs in sync with state
   useEffect(() => {
@@ -98,15 +103,15 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
     // Create chart
     const chart = createChart(chartContainerRef.current, {
       layout: {
-        background: { color: '#131a35' },
-        textColor: '#9ca3af',
+        background: { color: COLORS.chart.background },
+        textColor: COLORS.chart.text,
       },
       grid: {
         vertLines: { visible: false },
         horzLines: { visible: false },
       },
       width: chartContainerRef.current.clientWidth,
-      height: 500,
+      height: CHART_CONFIG.defaultHeight,
       timeScale: {
         timeVisible: true,
         secondsVisible: false,
@@ -122,8 +127,8 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
       },
       rightPriceScale: {
         scaleMargins: {
-          top: 0.1,
-          bottom: 0.2,
+          top: CHART_CONFIG.priceScaleMargins.top,
+          bottom: CHART_CONFIG.priceScaleMargins.bottom,
         },
       },
     })
@@ -132,18 +137,18 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
 
     // Add candlestick series
     const candlestickSeries = chart.addCandlestickSeries({
-      upColor: '#10b981',
-      downColor: '#ef4444',
+      upColor: COLORS.bullish,
+      downColor: COLORS.bearish,
       borderVisible: false,
-      wickUpColor: '#10b981',
-      wickDownColor: '#ef4444',
+      wickUpColor: COLORS.bullish,
+      wickDownColor: COLORS.bearish,
       priceFormat: {
         type: 'price',
-        precision: 2,
-        minMove: 0.25,
+        precision: CHART_CONFIG.priceFormat.precision,
+        minMove: CHART_CONFIG.priceFormat.minMove,
       },
       priceLineVisible: true,
-      priceLineColor: '#ffffff',
+      priceLineColor: COLORS.chart.priceLine,
       priceLineWidth: 1,
       priceLineStyle: 3, // Dashed
     })
@@ -152,7 +157,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
 
     // Add volume series
     const volumeSeries = chart.addHistogramSeries({
-      color: '#6b7280',
+      color: COLORS.neutral,
       priceFormat: {
         type: 'volume',
       },
@@ -161,31 +166,18 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
 
     volumeSeries.priceScale().applyOptions({
       scaleMargins: {
-        top: 0.8,
-        bottom: 0,
+        top: CHART_CONFIG.volumeScaleMargins.top,
+        bottom: CHART_CONFIG.volumeScaleMargins.bottom,
       },
     })
 
     volumeSeriesRef.current = volumeSeries
 
     // Add indicator line series
-    const indicators = [
-      { key: 'ema_12', color: '#ef4444', title: 'EMA(12)' },       // red (trend fast)
-      { key: 'ema_25', color: '#22c55e', title: 'EMA(25)' },       // green (trend slow)
-      { key: 'rvwap_7', color: '#f87171', title: 'RVWAP(7)' },     // light red
-      { key: 'rvwap_30', color: '#fb923c', title: 'RVWAP(30)' },   // orange
-      { key: 'rvwap_90', color: '#38bdf8', title: 'RVWAP(90)' },   // sky blue
-      { key: 'rvwap_200', color: '#a78bfa', title: 'RVWAP(200)' }, // purple
-      { key: 'ema_20', color: '#fb923c', title: 'EMA(20)' },       // orange
-      { key: 'ema_50', color: '#fbbf24', title: 'EMA(50)' },       // yellow
-      { key: 'ema_100', color: '#38bdf8', title: 'EMA(100)' },     // sky blue
-      { key: 'ema_200', color: '#a78bfa', title: 'EMA(200)' },     // purple
-    ]
-
-    indicators.forEach(ind => {
+    INDICATORS.forEach(ind => {
       const series = chart.addLineSeries({
         color: ind.color,
-        lineWidth: 2,
+        lineWidth: CHART_CONFIG.lineWidth,
         title: ind.title,
         priceLineVisible: false,
         lastValueVisible: false,
@@ -222,9 +214,9 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
       const visibleRange = timeScale.getVisibleLogicalRange()
       if (!visibleRange) return
 
-      // If user has scrolled to within 50 bars of the left edge, load more data
+      // If user has scrolled to within threshold bars of the left edge, load more data
       // Use refs to avoid stale closure
-      if (visibleRange.from < 50 && loadedBarsRef.current.length < totalBarsRef.current && !isLoadingMoreRef.current) {
+      if (visibleRange.from < CHART_CONFIG.scrollThreshold && loadedBarsRef.current.length < totalBarsRef.current && !isLoadingMoreRef.current) {
         console.log(`[LazyLoad] Near left edge (from: ${visibleRange.from}), triggering load more`)
         loadMoreData()
       }
@@ -257,15 +249,14 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
     const volumeData = sortedBars.map((bar) => ({
       time: bar.time as any,
       value: bar.volume,
-      color: bar.close >= bar.open ? '#10b98166' : '#ef444466',
+      color: bar.close >= bar.open ? COLORS.chart.volumeUp : COLORS.chart.volumeDown,
     }))
 
     candlestickSeriesRef.current.setData(candlestickData)
     volumeSeriesRef.current.setData(volumeData)
 
     // Update indicator series
-    const indicatorKeys = ['ema_12', 'ema_25', 'rvwap_7', 'rvwap_30', 'rvwap_90', 'rvwap_200', 'ema_20', 'ema_50', 'ema_100', 'ema_200']
-    indicatorKeys.forEach(key => {
+    ALL_INDICATOR_KEYS.forEach(key => {
       const series = indicatorSeriesRef.current.get(key)
       if (series) {
         const data = sortedBars
@@ -290,9 +281,9 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
       // Offset is simply the number of bars already loaded
       const newOffset = currentBars.length
       // Always fetch all indicators for consistency
-      const allIndicators = 'ema_12,ema_25,rvwap_7,rvwap_30,rvwap_90,rvwap_200,ema_20,ema_50,ema_100,ema_200'
+      const allIndicators = ALL_INDICATOR_KEYS.join(',')
       const response = await fetch(
-        `${API_BASE_URL}/api/v2/chart/${timeframe}?limit=${LOAD_MORE_SIZE}&offset=${newOffset}&indicators=${allIndicators}`
+        `${API_CONFIG.baseUrl}${API_CONFIG.endpoints.chart}/${timeframe}?limit=${CHART_CONFIG.loadMoreSize}&offset=${newOffset}&indicators=${allIndicators}`
       )
 
       if (!response.ok) {
@@ -324,8 +315,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
   // Separate effect for indicator visibility (no data fetch needed)
   useEffect(() => {
     // Show/hide indicator series based on selection
-    const allIndicatorKeys = ['ema_12', 'ema_25', 'rvwap_7', 'rvwap_30', 'rvwap_90', 'rvwap_200', 'ema_20', 'ema_50', 'ema_100', 'ema_200']
-    allIndicatorKeys.forEach(key => {
+    ALL_INDICATOR_KEYS.forEach(key => {
       const series = indicatorSeriesRef.current.get(key)
       if (series) {
         // Show if selected, hide if not
@@ -355,8 +345,8 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
         }
 
         // Always request all indicators so we have the data available for toggling
-        const allIndicators = 'ema_12,ema_25,rvwap_7,rvwap_30,rvwap_90,rvwap_200,ema_20,ema_50,ema_100,ema_200'
-        const response = await fetch(`${API_BASE_URL}/api/v2/chart/${timeframe}?limit=${INITIAL_LOAD}&offset=0&indicators=${allIndicators}`)
+        const allIndicators = ALL_INDICATOR_KEYS.join(',')
+        const response = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.chart}/${timeframe}?limit=${CHART_CONFIG.initialLoad}&offset=0&indicators=${allIndicators}`)
 
         if (!response.ok) {
           throw new Error('Failed to fetch chart data')
@@ -373,8 +363,8 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
         updateChartWithBars(bars)
 
         // Fetch S/R levels
-        const priceRangeParam = priceRangePct !== 10 ? `?price_range_pct=${priceRangePct}` : ''
-        const srResponse = await fetch(`${API_BASE_URL}/api/regime/support-resistance/${timeframe}${priceRangeParam}`)
+        const priceRangeParam = priceRangePct !== THRESHOLDS.srRange.default ? `?price_range_pct=${priceRangePct}` : ''
+        const srResponse = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.supportResistance}/${timeframe}${priceRangeParam}`)
         if (srResponse.ok) {
           const srData = await srResponse.json()
           console.log('S/R Data received:', srData)
@@ -392,9 +382,9 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
             srData.support.forEach((level: SRLevel) => {
               const line = candlestickSeriesRef.current?.createPriceLine({
                 price: level.price,
-                color: '#22c55e',
+                color: COLORS.chart.support,
                 lineWidth: 1,
-                lineStyle: 2, // Dotted
+                lineStyle: CHART_CONFIG.srLineStyle,
                 axisLabelVisible: true,
                 title: `S ${level.touches}`,
               })
@@ -409,9 +399,9 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
             srData.resistance.forEach((level: SRLevel) => {
               const line = candlestickSeriesRef.current?.createPriceLine({
                 price: level.price,
-                color: '#ef4444',
+                color: COLORS.chart.resistance,
                 lineWidth: 1,
-                lineStyle: 2, // Dotted
+                lineStyle: CHART_CONFIG.srLineStyle,
                 axisLabelVisible: true,
                 title: `R ${level.touches}`,
               })
@@ -450,7 +440,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
 
         // Fetch orderflow signals
         try {
-          const signalsResponse = await fetch(`${API_BASE_URL}/api/orderflow/signals/${timeframe}?limit=500`)
+          const signalsResponse = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.orderflowSignals}/${timeframe}?limit=${CHART_CONFIG.signalsLimit}`)
           if (signalsResponse.ok) {
             const signalsData = await signalsResponse.json()
             setOrderflowSignals(signalsData.signals || [])
@@ -475,29 +465,18 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
     fetchChartData()
   }, [timeframe, priceRangePct]) // Only refetch on timeframe or S/R range change, NOT on indicator change
 
-  const availableIndicators = [
-    { key: 'trend', label: 'Trend (12/25)', color: '#ef4444', color2: '#22c55e', isCombo: true, keys: ['ema_12', 'ema_25'] },
-    { key: 'rvwap_7', label: 'RVWAP(7)', color: '#f87171' },      // light red
-    { key: 'rvwap_30', label: 'RVWAP(30)', color: '#fb923c' },    // orange
-    { key: 'rvwap_90', label: 'RVWAP(90)', color: '#38bdf8' },    // sky blue
-    { key: 'rvwap_200', label: 'RVWAP(200)', color: '#a78bfa' },  // purple
-    { key: 'ema_20', label: 'EMA(20)', color: '#fb923c' },        // orange
-    { key: 'ema_50', label: 'EMA(50)', color: '#fbbf24' },        // yellow
-    { key: 'ema_100', label: 'EMA(100)', color: '#38bdf8' },      // sky blue
-    { key: 'ema_200', label: 'EMA(200)', color: '#a78bfa' },      // purple
-  ]
-
   const toggleIndicator = (key: string) => {
-    const indicator = availableIndicators.find(ind => ind.key === key)
-    if (indicator?.isCombo && indicator.keys) {
+    const indicator = AVAILABLE_INDICATORS.find(ind => ind.key === key)
+    if (indicator && 'isCombo' in indicator && indicator.isCombo && 'keys' in indicator) {
       // Handle combo indicator (like Trend which includes ema_12 and ema_25)
-      const allSelected = indicator.keys.every(k => selectedIndicators.includes(k))
+      const keys = indicator.keys as readonly string[]
+      const allSelected = keys.every((k: string) => selectedIndicators.includes(k))
       if (allSelected) {
         // Remove all keys
-        setSelectedIndicators(prev => prev.filter(k => !indicator.keys!.includes(k)))
+        setSelectedIndicators(prev => prev.filter(k => !keys.includes(k)))
       } else {
         // Add all keys
-        setSelectedIndicators(prev => [...new Set([...prev, ...indicator.keys!])])
+        setSelectedIndicators(prev => [...new Set([...prev, ...keys])])
       }
     } else {
       // Single indicator
@@ -507,8 +486,8 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
     }
   }
 
-  const isIndicatorSelected = (ind: typeof availableIndicators[0]) => {
-    if (ind.isCombo && ind.keys) {
+  const isIndicatorSelected = (ind: typeof AVAILABLE_INDICATORS[number]) => {
+    if ('isCombo' in ind && ind.isCombo && 'keys' in ind) {
       return ind.keys.every(k => selectedIndicators.includes(k))
     }
     return selectedIndicators.includes(ind.key)
@@ -535,7 +514,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
   useEffect(() => {
     const resizeChart = (isFullscreen: boolean) => {
       if (chartRef.current && chartContainerRef.current) {
-        const newHeight = isFullscreen ? window.innerHeight - 80 : 500
+        const newHeight = isFullscreen ? window.innerHeight - CHART_CONFIG.fullscreenHeaderOffset : CHART_CONFIG.defaultHeight
         const newWidth = chartContainerRef.current.clientWidth
 
         // Force the container to the correct height first
@@ -554,15 +533,15 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
 
       // When exiting fullscreen, reset container height immediately
       if (!isNowFullscreen && chartContainerRef.current) {
-        chartContainerRef.current.style.height = '500px'
+        chartContainerRef.current.style.height = `${CHART_CONFIG.defaultHeight}px`
       }
 
       // Resize chart when entering/exiting fullscreen
       // Use multiple timeouts to ensure layout has settled
       resizeChart(isNowFullscreen)
-      setTimeout(() => resizeChart(isNowFullscreen), 50)
-      setTimeout(() => resizeChart(isNowFullscreen), 150)
-      setTimeout(() => resizeChart(isNowFullscreen), 300)
+      CHART_CONFIG.resizeTimeouts.forEach(timeout => {
+        setTimeout(() => resizeChart(isNowFullscreen), timeout)
+      })
     }
 
     document.addEventListener('fullscreenchange', handleFullscreenChange)
@@ -573,8 +552,8 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
   useEffect(() => {
     if (!chartRef.current) return
 
-    const bgColor = isDarkBackground ? '#131a35' : '#ffffff'
-    const textColor = isDarkBackground ? '#9ca3af' : '#333333'
+    const bgColor = isDarkBackground ? COLORS.chart.background : COLORS.chart.backgroundLight
+    const textColor = isDarkBackground ? COLORS.chart.text : COLORS.chart.textLight
 
     chartRef.current.applyOptions({
       layout: {
@@ -606,23 +585,37 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
         // Absorption: Show the IMPLICATION for price direction
         // BULLISH (bids absorbing aggressive sells) = buyers defending = bullish = green up from below
         // BEARISH (asks absorbing aggressive buys) = sellers defending = bearish = red down from above
-        text = 'Abs'
+        text = LABELS.signals.absorption.slice(0, 3)
         shape = signal.direction === 'BULLISH' ? 'arrowUp' : 'arrowDown'
-        color = signal.direction === 'BULLISH' ? '#22c55e' : '#ef4444'
+        color = signal.direction === 'BULLISH' ? COLORS.signals.absorption : COLORS.bearish
         position = signal.direction === 'BULLISH' ? 'belowBar' : 'aboveBar'
       } else if (signal.signal_type === 'LSF') {
         // LSF: Shows reversal direction after stop sweep
-        text = 'LSF'
+        text = LABELS.signals.lsf
         shape = signal.direction === 'BULLISH' ? 'arrowUp' : 'arrowDown'
-        color = signal.direction === 'BULLISH' ? '#3b82f6' : '#f97316'
+        color = signal.direction === 'BULLISH' ? COLORS.signals.lsf : COLORS.signals.lsfBearish
         position = signal.direction === 'BULLISH' ? 'belowBar' : 'aboveBar'
       } else if (signal.signal_type === 'OB Imb') {
         // OBI (Order Book Imbalance): Shows which side has more depth stacked
         // BULLISH = more bids than asks (buying pressure) -> green square below bar
         // BEARISH = more asks than bids (selling pressure) -> red square above bar
-        text = 'OBI'
+        text = LABELS.signals.obi
         shape = 'square'
-        color = signal.direction === 'BULLISH' ? '#22c55e' : '#ef4444'
+        color = signal.direction === 'BULLISH' ? COLORS.bullishLight : COLORS.bearish
+        position = signal.direction === 'BULLISH' ? 'belowBar' : 'aboveBar'
+      } else if (signal.signal_type === 'Delta Unwind') {
+        // Delta Unwind: Cumulative delta reached extreme and is now reversing
+        // Trade in direction of the unwind (reversal signal)
+        text = 'DU'
+        shape = signal.direction === 'BULLISH' ? 'arrowUp' : 'arrowDown'
+        color = COLORS.signals.deltaUnwind
+        position = signal.direction === 'BULLISH' ? 'belowBar' : 'aboveBar'
+      } else if (signal.signal_type === 'Exhaustion') {
+        // Exhaustion: High volume with minimal price movement
+        // Indicates move is running out of steam (reversal signal)
+        text = 'EXH'
+        shape = signal.direction === 'BULLISH' ? 'arrowUp' : 'arrowDown'
+        color = COLORS.signals.exhaustion
         position = signal.direction === 'BULLISH' ? 'belowBar' : 'aboveBar'
       }
 
@@ -632,7 +625,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
         color: color,
         shape: shape,
         text: text,
-        size: 1,
+        size: CHART_CONFIG.markerSize,
       }
     })
 
@@ -650,19 +643,19 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
     >
       <div className="chart-header">
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <h3 style={{ margin: 0 }}>MNQ</h3>
+          <h3 style={{ margin: 0 }}>{LABELS.symbol}</h3>
           {/* Timeframe selector */}
           <div style={{ display: 'flex', gap: '4px' }}>
-            {TIMEFRAMES.map((tf) => (
+            {CONFIG_TIMEFRAMES.map((tf) => (
               <button
                 key={tf}
                 onClick={() => onTimeframeChange?.(tf)}
                 style={{
                   padding: '4px 10px',
                   borderRadius: '4px',
-                  border: timeframe === tf ? '1px solid #3b82f6' : '1px solid #4b5563',
-                  background: timeframe === tf ? '#1e40af' : '#1f2937',
-                  color: timeframe === tf ? '#ffffff' : '#9ca3af',
+                  border: timeframe === tf ? `1px solid ${COLORS.border.active}` : `1px solid ${COLORS.border.light}`,
+                  background: timeframe === tf ? COLORS.background.buttonHover : COLORS.background.button,
+                  color: timeframe === tf ? COLORS.text.white : COLORS.text.secondary,
                   cursor: 'pointer',
                   fontSize: '12px',
                   fontWeight: timeframe === tf ? 600 : 400,
@@ -672,9 +665,9 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
               </button>
             ))}
           </div>
-          {isLoadingMore && <span style={{ fontSize: '12px', color: '#6b7280' }}>(loading...)</span>}
+          {isLoadingMore && <span style={{ fontSize: '12px', color: COLORS.text.muted }}>(loading...)</span>}
         </div>
-        <span style={{ fontSize: '11px', color: '#6b7280' }}>
+        <span style={{ fontSize: '11px', color: COLORS.text.muted }}>
           {loadedBars.length > 0 && `${loadedBars.length.toLocaleString()} / ${totalBars.toLocaleString()} bars`}
         </span>
         <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
@@ -683,9 +676,9 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
             style={{
               padding: '4px 12px',
               borderRadius: '4px',
-              border: '1px solid #4b5563',
-              background: isDarkBackground ? '#1f2937' : '#e5e7eb',
-              color: isDarkBackground ? '#e5e7eb' : '#1f2937',
+              border: `1px solid ${COLORS.border.light}`,
+              background: isDarkBackground ? COLORS.background.button : COLORS.text.primary,
+              color: isDarkBackground ? COLORS.text.primary : COLORS.background.button,
               cursor: 'pointer',
               fontSize: '12px'
             }}
@@ -698,9 +691,9 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
             style={{
               padding: '4px 12px',
               borderRadius: '4px',
-              border: '1px solid #4b5563',
-              background: '#1f2937',
-              color: '#e5e7eb',
+              border: `1px solid ${COLORS.border.light}`,
+              background: COLORS.background.button,
+              color: COLORS.text.primary,
               cursor: 'pointer',
               fontSize: '12px'
             }}
@@ -713,29 +706,37 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
             style={{
               padding: '4px 12px',
               borderRadius: '4px',
-              border: showOrderflowSignals ? '1px solid #3b82f6' : '1px solid #4b5563',
-              background: showOrderflowSignals ? '#1e40af' : '#1f2937',
-              color: showOrderflowSignals ? '#ffffff' : '#9ca3af',
+              border: showOrderflowSignals ? `1px solid ${COLORS.border.active}` : `1px solid ${COLORS.border.light}`,
+              background: showOrderflowSignals ? COLORS.background.buttonHover : COLORS.background.button,
+              color: showOrderflowSignals ? COLORS.text.white : COLORS.text.secondary,
               cursor: 'pointer',
               fontSize: '12px',
               fontWeight: showOrderflowSignals ? 600 : 400,
             }}
-            title="Toggle orderflow signals (Absorption, LSF, OBI)"
+            title="Toggle orderflow signals (Absorption, LSF, OBI, Delta Unwind, Exhaustion)"
           >
             Signals {orderflowSignals.length > 0 ? `(${orderflowSignals.length})` : ''}
           </button>
           <div className="chart-legend">
             <span className="legend-item" title="Absorption">
-              <span className="legend-color" style={{ backgroundColor: '#22c55e' }}></span>
-              Abs
+              <span className="legend-color" style={{ backgroundColor: COLORS.signals.absorption }}></span>
+              {LABELS.signals.absorption.slice(0, 3)}
             </span>
             <span className="legend-item" title="Liquidity Sweep Fade">
-              <span className="legend-color" style={{ backgroundColor: '#3b82f6' }}></span>
-              LSF
+              <span className="legend-color" style={{ backgroundColor: COLORS.signals.lsf }}></span>
+              {LABELS.signals.lsf}
             </span>
             <span className="legend-item" title="Order Book Imbalance (green=bid heavy, red=ask heavy)">
-              <span className="legend-color" style={{ backgroundColor: '#22c55e' }}></span>
-              OBI
+              <span className="legend-color" style={{ backgroundColor: COLORS.signals.absorption }}></span>
+              {LABELS.signals.obi}
+            </span>
+            <span className="legend-item" title="Delta Unwind - Reversal after extreme delta">
+              <span className="legend-color" style={{ backgroundColor: COLORS.signals.deltaUnwind }}></span>
+              DU
+            </span>
+            <span className="legend-item" title="Exhaustion - High volume, minimal price movement">
+              <span className="legend-color" style={{ backgroundColor: COLORS.signals.exhaustion }}></span>
+              EXH
             </span>
           </div>
           <div style={{ position: 'relative' }}>
@@ -744,9 +745,9 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
               style={{
                 padding: '4px 12px',
                 borderRadius: '4px',
-                border: '1px solid #4b5563',
-                background: '#1f2937',
-                color: '#e5e7eb',
+                border: `1px solid ${COLORS.border.light}`,
+                background: COLORS.background.button,
+                color: COLORS.text.primary,
                 cursor: 'pointer',
                 fontSize: '12px'
               }}
@@ -759,8 +760,8 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
                 top: '100%',
                 right: 0,
                 marginTop: '4px',
-                background: '#1f2937',
-                border: '1px solid #4b5563',
+                background: COLORS.background.button,
+                border: `1px solid ${COLORS.border.light}`,
                 borderRadius: '4px',
                 padding: '8px',
                 minWidth: '160px',
@@ -768,7 +769,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
                 boxShadow: '0 4px 6px rgba(0, 0, 0, 0.3)'
               }}>
                 <div style={{
-                  borderBottom: '1px solid #4b5563',
+                  borderBottom: `1px solid ${COLORS.border.light}`,
                   paddingBottom: '8px',
                   marginBottom: '8px'
                 }}>
@@ -777,29 +778,29 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
                     flexDirection: 'column',
                     padding: '4px 8px',
                     fontSize: '12px',
-                    color: '#e5e7eb',
+                    color: COLORS.text.primary,
                     gap: '4px'
                   }}>
                     <span>S/R Range (±%)</span>
                     <input
                       type="number"
-                      min="0"
-                      max="100"
-                      step="5"
+                      min={THRESHOLDS.srRange.min}
+                      max={THRESHOLDS.srRange.max}
+                      step={THRESHOLDS.srRange.step}
                       value={priceRangePct}
                       onChange={(e) => setPriceRangePct(Number(e.target.value))}
                       style={{
                         padding: '4px',
                         borderRadius: '2px',
-                        border: '1px solid #4b5563',
-                        background: '#131a35',
-                        color: '#e5e7eb',
+                        border: `1px solid ${COLORS.border.light}`,
+                        background: COLORS.background.secondary,
+                        color: COLORS.text.primary,
                         fontSize: '12px'
                       }}
                     />
                   </label>
                 </div>
-                {availableIndicators.map(ind => (
+                {AVAILABLE_INDICATORS.map(ind => (
                   <label
                     key={ind.key}
                     style={{
@@ -808,7 +809,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
                       padding: '4px 8px',
                       cursor: 'pointer',
                       fontSize: '12px',
-                      color: '#e5e7eb',
+                      color: COLORS.text.primary,
                       gap: '8px'
                     }}
                   >
@@ -820,7 +821,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
                     />
                     <div style={{ display: 'flex', gap: '2px' }}>
                       <span style={{ width: '12px', height: '12px', background: ind.color, borderRadius: '2px' }}></span>
-                      {ind.color2 && <span style={{ width: '12px', height: '12px', background: ind.color2, borderRadius: '2px' }}></span>}
+                      {'color2' in ind && ind.color2 && <span style={{ width: '12px', height: '12px', background: ind.color2, borderRadius: '2px' }}></span>}
                     </div>
                     <span>{ind.label}</span>
                   </label>
@@ -836,7 +837,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
           top: '50%',
           left: '50%',
           transform: 'translate(-50%, -50%)',
-          color: '#9ca3af',
+          color: COLORS.text.secondary,
           zIndex: 10
         }}>
           Loading chart data...

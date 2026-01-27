@@ -1,6 +1,13 @@
 import { useEffect, useState } from 'react'
 import './RegimePanel.css'
-import { API_BASE_URL } from '../config'
+import {
+  API_CONFIG,
+  COLORS,
+  POLLING_INTERVALS,
+  THRESHOLDS,
+  LABELS,
+  getDirectionIcon,
+} from '../config'
 
 interface DOMSummary {
   timeframe: string
@@ -24,26 +31,26 @@ export default function RegimePanel() {
 
   useEffect(() => {
     fetchData()
-    // Poll for updates every 5 seconds
-    const interval = setInterval(fetchData, 5000)
+    // Poll for updates
+    const interval = setInterval(fetchData, POLLING_INTERVALS.domSignals)
     return () => clearInterval(interval)
   }, [])
 
   const fetchData = async () => {
     try {
       // Fetch DOM data
-      const metricsResponse = await fetch(`${API_BASE_URL}/api/orderflow/metrics`)
+      const metricsResponse = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.metrics}`)
       if (metricsResponse.ok) {
         const metricsData = await metricsResponse.json()
         setDomData(metricsData.dom_by_timeframe || [])
       }
 
       // Fetch recent signals (from 1H timeframe as representative)
-      const signalsResponse = await fetch(`${API_BASE_URL}/api/orderflow/signals/1H?limit=100`)
+      const signalsResponse = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.orderflowSignals}/1H?limit=${THRESHOLDS.signals.fetchLimit}`)
       if (signalsResponse.ok) {
         const signalsData = await signalsResponse.json()
-        // Get only the 5 most recent signals
-        const recent = (signalsData.signals || []).slice(-5).reverse()
+        // Get only the most recent signals
+        const recent = (signalsData.signals || []).slice(-THRESHOLDS.signals.recentCount).reverse()
         setRecentSignals(recent)
       }
 
@@ -123,33 +130,20 @@ export default function RegimePanel() {
       {/* Signal Legend */}
       <div className="signal-legend">
         <div className="legend-row">
-          <span className="legend-dot" style={{ backgroundColor: '#22c55e' }}></span>
-          <span>Absorption - Price defended</span>
+          <span className="legend-dot" style={{ backgroundColor: COLORS.signals.absorption }}></span>
+          <span>{LABELS.signals.absorption} - Price defended</span>
         </div>
         <div className="legend-row">
-          <span className="legend-dot" style={{ backgroundColor: '#3b82f6' }}></span>
-          <span>LSF - Stop sweep reversal</span>
+          <span className="legend-dot" style={{ backgroundColor: COLORS.signals.lsf }}></span>
+          <span>{LABELS.signals.lsf} - Stop sweep reversal</span>
         </div>
         <div className="legend-row">
-          <span className="legend-dot" style={{ backgroundColor: '#a855f7' }}></span>
-          <span>OBI - Order book imbalance</span>
+          <span className="legend-dot" style={{ backgroundColor: COLORS.signals.obi }}></span>
+          <span>{LABELS.signals.obi} - Order book imbalance</span>
         </div>
       </div>
     </div>
   )
-}
-
-function getDirectionIcon(direction: string): string {
-  switch (direction) {
-    case 'BULLISH':
-      return '▲'
-    case 'BEARISH':
-      return '▼'
-    case 'NEUTRAL':
-      return '●'
-    default:
-      return '●'
-  }
 }
 
 function getSampleDOMData(): DOMSummary[] {

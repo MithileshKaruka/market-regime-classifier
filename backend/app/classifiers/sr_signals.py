@@ -4,6 +4,8 @@ from typing import Literal, Optional
 from dataclasses import dataclass
 import polars as pl
 
+from config import get_config
+
 logger = logging.getLogger(__name__)
 
 SignalType = Literal["BUY", "SELL", "NONE"]
@@ -27,20 +29,28 @@ class SRSignalGenerator:
 
     def __init__(
         self,
-        dom_threshold: float = 0.55,
-        cvd_threshold: int = 500,
-        proximity_pct: float = 0.002,  # 0.2% proximity to S/R level
+        dom_threshold: Optional[float] = None,
+        cvd_threshold: Optional[int] = None,
+        proximity_pct: Optional[float] = None,
     ):
         """Initialize signal generator
 
         Args:
-            dom_threshold: DOM imbalance threshold
-            cvd_threshold: CVD threshold
-            proximity_pct: Price proximity to S/R level (as percentage)
+            dom_threshold: DOM imbalance threshold (default from config)
+            cvd_threshold: CVD threshold (default from config)
+            proximity_pct: Price proximity to S/R level as percentage (default from config)
         """
-        self.dom_threshold = dom_threshold
-        self.cvd_threshold = cvd_threshold
-        self.proximity_pct = proximity_pct
+        # Load defaults from config
+        config = get_config()
+        sr_config = config.support_resistance
+
+        self.dom_threshold = dom_threshold or sr_config.signal_thresholds.dom_threshold
+        self.cvd_threshold = cvd_threshold or int(sr_config.signal_thresholds.cvd_threshold)
+        self.proximity_pct = proximity_pct or sr_config.proximity_pct
+
+        # Signal weights from config
+        self.dom_weight = sr_config.signal_weights.dom
+        self.cvd_weight = sr_config.signal_weights.cvd
         logger.info("SRSignalGenerator initialized")
 
     def calculate_dom_score(self, dom_imbalance: float) -> tuple[float, str]:
@@ -125,8 +135,8 @@ class SRSignalGenerator:
         dom_score, dom_bias = self.calculate_dom_score(dom_imbalance)
         cvd_score, cvd_bias = self.calculate_cvd_score(cvd)
 
-        # Weighted score: DOM 50%, CVD 50%
-        combined_score = (dom_score * 0.5) + (cvd_score * 0.5)
+        # Weighted score using config weights
+        combined_score = (dom_score * self.dom_weight) + (cvd_score * self.cvd_weight)
 
         # Generate BUY signal if bullish (combined_score > 0)
         if combined_score > 0:
@@ -181,8 +191,8 @@ class SRSignalGenerator:
         dom_score, dom_bias = self.calculate_dom_score(dom_imbalance)
         cvd_score, cvd_bias = self.calculate_cvd_score(cvd)
 
-        # Weighted score: DOM 50%, CVD 50%
-        combined_score = (dom_score * 0.5) + (cvd_score * 0.5)
+        # Weighted score using config weights
+        combined_score = (dom_score * self.dom_weight) + (cvd_score * self.cvd_weight)
 
         # Generate SELL signal if bearish (combined_score < 0)
         if combined_score < 0:

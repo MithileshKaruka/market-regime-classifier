@@ -9,6 +9,7 @@ from app.features.orderflow_signals import OrderflowSignalDetector, SignalType, 
 from app.features.orderflow_metrics import OrderflowMetricsCalculator, BiasStrength
 from app.features.agent_bias import AgentBiasCalculator, AgentMode
 from app.agent.graph import run_agent, TradeAction, PositionState
+from config import get_config
 
 router = APIRouter()
 
@@ -109,14 +110,18 @@ async def get_orderflow_signals(
     detect_absorption: bool = Query(True, description="Detect absorption signals"),
     detect_lsf: bool = Query(True, description="Detect liquidity sweep fade signals"),
     detect_obi: bool = Query(True, description="Detect order book imbalance signals"),
+    detect_delta_unwind: bool = Query(True, description="Detect delta unwind signals"),
+    detect_exhaustion: bool = Query(True, description="Detect exhaustion signals"),
 ):
     """
     Get orderflow signals for a timeframe
 
-    Detects three types of signals:
+    Detects five types of signals:
     1. **Absorption**: Large volume hitting a level but price stays stable
     2. **LSF** (Liquidity Sweep Fade): Stop run followed by snap-back
     3. **OB Imb** (Order Book Imbalance): Strong weighted imbalance in order book
+    4. **Delta Unwind**: Cumulative delta reached extreme and is now reversing
+    5. **Exhaustion**: High volume with minimal price movement
     """
     with DuckDBStorage() as storage:
         # Get OHLCV + order flow data
@@ -157,15 +162,23 @@ async def get_orderflow_signals(
             (pl.col("volume") * (1 - pl.col("dom_imbalance"))).alias("total_ask_depth"),
         ])
 
-        # Initialize detector with looser thresholds for real-world data
+        # Initialize detector with config values
+        config = get_config()
         detector = OrderflowSignalDetector(
-            absorption_volume_mult=1.3,
-            absorption_price_tol=0.001,
-            absorption_dom_threshold=0.52,
-            lsf_spike_mult=1.5,
-            lsf_snapback_pct=0.002,
-            obi_threshold=1.15,
-            lookback_bars=20,
+            timeframe=timeframe,
+            absorption_volume_mult=config.orderflow_alpha.absorption_volume_mult,
+            absorption_price_tol=config.orderflow_alpha.absorption_price_tol,
+            absorption_dom_threshold=config.orderflow_alpha.absorption_dom_threshold,
+            lsf_sweep_threshold_pct=config.orderflow_alpha.lsf_sweep_threshold_pct,
+            lsf_snapback_pct=config.orderflow_alpha.lsf_snapback_pct,
+            lsf_snapback_bars=config.orderflow_alpha.lsf_snapback_bars,
+            obi_threshold=config.orderflow_alpha.obi_threshold,
+            delta_zscore_threshold=config.orderflow_alpha.delta_zscore_threshold,
+            delta_unwind_pct=config.orderflow_alpha.delta_unwind_pct,
+            delta_unwind_bars=config.orderflow_alpha.delta_unwind_bars,
+            exhaustion_volume_mult=config.orderflow_alpha.exhaustion_volume_mult,
+            exhaustion_range_ratio_max=config.orderflow_alpha.exhaustion_range_ratio_max,
+            lookback_bars=config.orderflow_alpha.absorption_lookback,
         )
 
         # Detect signals
@@ -174,6 +187,8 @@ async def get_orderflow_signals(
             detect_absorption=detect_absorption,
             detect_lsf=detect_lsf,
             detect_obi=detect_obi,
+            detect_delta_unwind=detect_delta_unwind,
+            detect_exhaustion=detect_exhaustion,
         )
 
         # Convert to response format
@@ -223,10 +238,12 @@ async def get_simplified_metrics():
                 row = df.row(0, named=True)
                 dom = row["dom_imbalance"]
 
-                # Classify direction
-                if dom > 0.55:
+                # Classify direction using config threshold
+                config = get_config()
+                dom_threshold = config.regime.thresholds.dom_threshold
+                if dom > dom_threshold:
                     direction = "BULLISH"
-                elif dom < 0.45:
+                elif dom < (1 - dom_threshold):
                     direction = "BEARISH"
                 else:
                     direction = "NEUTRAL"
@@ -340,14 +357,15 @@ async def get_advanced_metrics(
             (pl.col("volume") * (1 - pl.col("dom_imbalance"))).alias("total_ask_depth"),
         ])
 
-        # Calculate advanced metrics
+        # Calculate advanced metrics using config values
+        config = get_config()
         calculator = OrderflowMetricsCalculator(
-            rvol_lookback=20,
-            rvol_high_threshold=1.5,
-            vpin_num_buckets=50,
-            vpin_alert_threshold=0.7,
-            ldr_wall_threshold=2.5,
-            poc_lookback=100,
+            rvol_lookback=config.market_intensity.rvol_lookback,
+            rvol_high_threshold=config.market_intensity.rvol_high,
+            vpin_num_buckets=config.market_intensity.vpin_num_buckets,
+            vpin_alert_threshold=config.market_intensity.vpin_alert,
+            ldr_wall_threshold=config.orderflow_alpha.ldr_wall_threshold,
+            poc_lookback=config.market_intensity.poc_lookback,
         )
 
         dashboard = calculator.calculate_all_metrics(df)
@@ -503,12 +521,15 @@ async def get_agent_bias(
         vpin_metrics = metrics_calc.calculate_vpin(df)
         ldr_metrics = metrics_calc.calculate_ldr(df)
 
-        # Get orderflow signals for absorption and LSF
+        # Get orderflow signals for absorption and LSF using config
+        config = get_config()
         detector = OrderflowSignalDetector(
-            absorption_volume_mult=1.3,
-            lsf_spike_mult=1.5,
-            obi_threshold=1.15,
-            lookback_bars=20,
+            timeframe=timeframe,
+            absorption_volume_mult=config.orderflow_alpha.absorption_volume_mult,
+            lsf_sweep_threshold_pct=config.orderflow_alpha.lsf_sweep_threshold_pct,
+            lsf_snapback_pct=config.orderflow_alpha.lsf_snapback_pct,
+            obi_threshold=config.orderflow_alpha.obi_threshold,
+            lookback_bars=config.orderflow_alpha.absorption_lookback,
         )
 
         # Only look at recent signals (last 20 bars)

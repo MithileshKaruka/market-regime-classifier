@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from enum import Enum
 import polars as pl
 
-from app.config import get_config
+from config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +128,7 @@ class AgentBiasCalculator:
         # Trend & Structure params
         self.ema_fast = config.trend_structure.ema_fast
         self.ema_slow = config.trend_structure.ema_slow
-        self.structure_lookback = 20  # Could add to config
+        self.structure_lookback = config.trend_structure.structure_lookback
 
         # Market Intensity params
         self.rvol_high_threshold = config.market_intensity.rvol_high

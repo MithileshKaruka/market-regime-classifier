@@ -36,8 +36,53 @@ trend_structure:
   # Swing detection lookback
   swing_lookback: 5
 
+  # Market structure analysis lookback
+  structure_lookback: 20
+
   # S/R proximity threshold (percentage)
   sr_proximity_pct: 0.5
+
+# =============================================================================
+# TECHNICAL INDICATORS
+# =============================================================================
+indicators:
+  # Rolling VWAP periods
+  rvwap_periods: [7, 30, 90, 200]
+
+  # EMA periods
+  ema_periods: [20, 50, 100, 200]
+
+  # Bollinger Bands
+  bb_period: 20
+  bb_std: 2.0
+
+  # ATR (Average True Range)
+  atr_period: 14
+
+# =============================================================================
+# INSTRUMENT CONFIGURATION
+# =============================================================================
+instrument:
+  symbol: MNQ
+  tick_size: 0.25
+  min_price: 18000            # Price filter minimum
+  max_price: 32000            # Price filter maximum
+
+# =============================================================================
+# LIVE STREAMING CONFIGURATION
+# =============================================================================
+streaming:
+  dataset: GLBX.MDP3          # Databento dataset
+  default_symbols:
+    - MNQ
+  default_timeframes:
+    - 5M
+    - 15M
+    - 1H
+    - 4H
+    - 1D
+  flush_interval_seconds: 1.0 # How often to flush to database
+  dom_smoothing_factor: 0.9   # EMA factor for DOM updates (0.9 = slow, 0.5 = fast)
 
 # =============================================================================
 # MARKET INTENSITY PARAMETERS
@@ -50,16 +95,23 @@ market_intensity:
 
   # VPIN thresholds
   vpin_buckets: 50
+  vpin_num_buckets: 50      # Number of buckets for rolling VPIN calculation
   vpin_elevated: 0.5        # Above this = elevated informed trading
   vpin_alert: 0.7           # Above this = high alert
+
+  # POC (Point of Control)
+  poc_lookback: 100         # Bars to look back for POC calculation
 
 # =============================================================================
 # ORDERFLOW ALPHA PARAMETERS
 # =============================================================================
 orderflow_alpha:
   # OBI (Order Book Imbalance) thresholds
-  obi_strong_imbalance: 1.5   # Bid/Ask ratio for strong signal
-  obi_moderate_imbalance: 1.2
+  # Backtested: 15M shows edge (55.7% hit rate, 1.57 PF at threshold 2.2)
+  # 5M and 1M show no significant edge with current detection logic
+  obi_strong_imbalance: 2.5   # Bid/Ask ratio for strong signal
+  obi_moderate_imbalance: 2.0 # Moderate imbalance threshold
+  obi_threshold: 2.2          # Signal detection threshold (backtested optimal)
 
   # LDR (Liquidity Depth Ratio) thresholds
   ldr_wall_threshold: 2.5     # Ratio for support/resistance wall detection
@@ -74,12 +126,78 @@ orderflow_alpha:
   # - Weak: |CVD| < threshold = 40-60 score contribution
 
   # Absorption detection
-  absorption_volume_mult: 1.3  # Volume multiplier vs average
-  absorption_lookback: 20
+  # Default values (conservative middle-ground for untested timeframes)
+  absorption_volume_mult: 1.5  # Volume multiplier vs average
+  absorption_price_tol: 0.0015  # 0.15% price tolerance for stable price
+  absorption_dom_threshold: 0.52  # DOM > 0.52 bullish, < 0.48 bearish
+  absorption_lookback: 15
 
-  # LSF (Liquidity Sweep Fade) detection
-  lsf_spike_mult: 1.5         # Price spike multiplier
-  lsf_lookback: 20
+  # Timeframe-specific absorption parameters
+  # 1M, 5M, 15M: from backtesting | 1H+: projected (needs more data)
+  absorption_by_tf:
+    1M:
+      volume_mult: 1.8
+      price_tol: 0.002
+      dom_threshold: 0.51
+      lookback: 10
+    5M:
+      volume_mult: 1.8
+      price_tol: 0.0005
+      dom_threshold: 0.51
+      lookback: 50
+    15M:  # Backtested: 66.7% hit rate, 3.56 PF
+      volume_mult: 1.3
+      price_tol: 0.002
+      dom_threshold: 0.51
+      lookback: 10
+    1H:  # Projected - DOM averages to 0.5 at this TF, needs different approach
+      volume_mult: 1.8
+      price_tol: 0.005
+      dom_threshold: 0.51
+      lookback: 24
+    4H:  # Projected
+      volume_mult: 1.8
+      price_tol: 0.005
+      dom_threshold: 0.51
+      lookback: 30
+    1D:  # Projected
+      volume_mult: 1.8
+      price_tol: 0.005
+      dom_threshold: 0.51
+      lookback: 20
+
+  # Timeframe-specific OBI thresholds
+  # Only 15M currently shows predictive value; others use higher thresholds
+  obi_by_tf:
+    1M:
+      threshold: 2.5          # Higher threshold, marginal edge
+    5M:
+      threshold: 2.2          # Marginal edge at best
+    15M:                      # Backtested: 55.7% hit rate, 1.57 PF
+      threshold: 2.2
+    1H:
+      threshold: 2.0          # Projected (untested)
+    4H:
+      threshold: 2.0          # Projected (untested)
+    1D:
+      threshold: 2.0          # Projected (untested)
+
+  # LSF (Liquidity Sweep Fade) detection - PURE PRICE BASED
+  # No delta requirement - focuses on price sweeps and snapbacks
+  lsf_sweep_threshold_pct: 0.001  # Min % price must exceed prior high/low (0.1%)
+  lsf_snapback_pct: 0.002         # Min % snapback into range (0.2%)
+  lsf_snapback_bars: 3            # Max bars to wait for snapback
+
+  # Delta Unwind detection
+  # Detects when cumulative delta reaches extreme and starts reversing
+  delta_zscore_threshold: 2.0     # Z-score threshold for "extreme" delta
+  delta_unwind_pct: 0.1           # Min % of delta that must unwind (10%)
+  delta_unwind_bars: 3            # Bars to confirm unwind
+
+  # Exhaustion detection
+  # High volume with minimal price movement indicates exhaustion
+  exhaustion_volume_mult: 1.5     # Volume must exceed avg by this mult
+  exhaustion_range_ratio_max: 0.5 # Price range must be < expected * this ratio
 
 # =============================================================================
 # RISK MANAGEMENT
@@ -128,8 +246,10 @@ signals:
   # Signal strength multipliers (how much each signal type contributes)
   strength_multipliers:
     absorption: 1.0
-    lsf: 1.2                  # LSF slightly more weight (reversal signal)
+    lsf: 1.0                  # Pure price LSF
     obi: 0.8
+    delta_unwind: 1.2         # Delta unwind (reversal signal)
+    exhaustion: 1.0           # Exhaustion (reversal signal)
 
 # =============================================================================
 # REGIME CLASSIFICATION
@@ -160,8 +280,29 @@ regime:
 # =============================================================================
 support_resistance:
   # S/R Level Detection
-  min_touches: 3              # Minimum touches to consider a level significant
+  min_touches: 3              # Minimum touches to consider a level significant (default)
   proximity_pct: 0.002        # Price proximity to level (0.2%)
+  swing_window: 5             # Window for swing point detection (default)
+
+  # Timeframe-specific swing windows (smaller = more sensitive)
+  swing_window_by_tf:
+    5M: 3                     # Very sensitive for intraday
+    15M: 3                    # Sensitive for intraday
+    1H: 3                     # More sensitive to catch more levels
+    4H: 3                     # More sensitive to catch more levels
+    1D: 5                     # Standard for daily
+
+  # Timeframe-specific min touches
+  min_touches_by_tf:
+    5M: 2                     # Lower for intraday
+    15M: 2
+    1H: 2
+    4H: 2
+    1D: 2
+
+  # Volume Profile
+  volume_profile_bins: 50     # Number of price bins for volume profile
+  volume_profile_top_n: 3     # Top N volume nodes to include
 
   # S/R Signal Weights (for buy/sell signals at S/R levels)
   # Order: [DOM, CVD] - VWAP ignored for S/R signals

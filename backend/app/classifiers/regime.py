@@ -1,8 +1,10 @@
 """Regime classification based on order flow analysis"""
 import logging
-from typing import Literal
+from typing import Literal, Optional
 from dataclasses import dataclass
 import polars as pl
+
+from config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -22,20 +24,24 @@ class RegimeClassifier:
 
     def __init__(
         self,
-        dom_threshold: float = 0.55,
-        delta_threshold: int = 500,
-        vwap_threshold: float = 0.001,
+        dom_threshold: Optional[float] = None,
+        delta_threshold: Optional[int] = None,
+        vwap_threshold: Optional[float] = None,
     ):
         """Initialize classifier with thresholds
 
         Args:
-            dom_threshold: DOM imbalance threshold for bullish/bearish
-            delta_threshold: Delta threshold for bullish/bearish
-            vwap_threshold: VWAP distance threshold (as percentage)
+            dom_threshold: DOM imbalance threshold for bullish/bearish (default from config)
+            delta_threshold: Delta threshold for bullish/bearish (default from config)
+            vwap_threshold: VWAP distance threshold as percentage (default from config)
         """
-        self.dom_threshold = dom_threshold
-        self.delta_threshold = delta_threshold
-        self.vwap_threshold = vwap_threshold
+        # Load defaults from config
+        config = get_config()
+        regime_config = config.regime.thresholds
+
+        self.dom_threshold = dom_threshold or regime_config.dom_threshold
+        self.delta_threshold = delta_threshold or int(regime_config.cvd_threshold)
+        self.vwap_threshold = vwap_threshold or regime_config.vwap_threshold
         logger.info("RegimeClassifier initialized")
 
     def classify_from_dom(self, dom_imbalance: float) -> RegimeSignal:
@@ -153,14 +159,16 @@ class RegimeClassifier:
         Args:
             signals: List of regime signals
             weights: Optional list of weights for each signal (must match length of signals)
-                    Default: [0.6, 0.2, 0.2] for [DOM, CVD, VWAP]
+                    Default from config: [DOM, CVD, VWAP]
 
         Returns:
             Tuple of (regime, confidence, key_signal)
         """
-        # Default weights: DOM 60%, CVD 20%, VWAP 20%
+        # Load default weights from config
         if weights is None:
-            weights = [0.6, 0.2, 0.2]
+            config = get_config()
+            sw = config.regime.signal_weights
+            weights = [sw.dom, sw.cvd, sw.vwap]
 
         if len(weights) != len(signals):
             # Fallback to equal weights if mismatch

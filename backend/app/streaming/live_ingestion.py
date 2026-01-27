@@ -9,7 +9,7 @@ These schemas are available on Databento's personal plan for live streaming.
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import databento as db
 import polars as pl
 
@@ -18,6 +18,7 @@ from app.features.trade_flow import TradeFlowCalculator, merge_quotes_and_trades
 from app.classifiers.regime import RegimeClassifier
 from app.data.storage import DuckDBStorage
 from app.streaming.live_cache import get_cache
+from config import get_config
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,18 +43,23 @@ class LiveDataIngestion:
     def __init__(
         self,
         api_key: str,
-        dataset: str = "GLBX.MDP3",
-        symbols: list[str] = None,
-        timeframes: list[str] = None,
+        dataset: Optional[str] = None,
+        symbols: Optional[List[str]] = None,
+        timeframes: Optional[List[str]] = None,
         db_path: str = "/data/live.duckdb",
-        flush_interval_seconds: float = 1.0
+        flush_interval_seconds: Optional[float] = None
     ):
+        # Load defaults from config
+        config = get_config()
+        streaming_config = config.streaming
+
         self.api_key = api_key
-        self.dataset = dataset
-        self.symbols = symbols or ["MNQ"]
-        self.timeframes = timeframes or ["5M", "15M", "1H", "4H", "1D"]
+        self.dataset = dataset or streaming_config.dataset
+        self.symbols = symbols or streaming_config.default_symbols
+        self.timeframes = timeframes or streaming_config.default_timeframes
         self.db_path = db_path
-        self.flush_interval = flush_interval_seconds
+        self.flush_interval = flush_interval_seconds or streaming_config.flush_interval_seconds
+        self._dom_smoothing = streaming_config.dom_smoothing_factor
 
         # Calculators - MBP-1 uses 1 level
         self.quote_calculator = OrderFlowCalculator(levels=1)
@@ -182,8 +188,8 @@ class LiveDataIngestion:
             bar['trade_count'] += 1
             bar['price_volume_sum'] += price * size
             bar['vwap'] = bar['price_volume_sum'] / bar['volume']
-            # Update DOM imbalance (exponential moving average)
-            bar['dom_imbalance'] = 0.9 * bar['dom_imbalance'] + 0.1 * dom_imbalance
+            # Update DOM imbalance (exponential moving average using config smoothing factor)
+            bar['dom_imbalance'] = self._dom_smoothing * bar['dom_imbalance'] + (1 - self._dom_smoothing) * dom_imbalance
             return bar
 
     async def process_quote(self, quote: dict, symbol: str):

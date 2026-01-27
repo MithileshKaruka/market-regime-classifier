@@ -8,7 +8,7 @@ from app.data.storage import DuckDBStorage
 from app.features.support_resistance import SupportResistanceDetector
 from app.features.indicators import TechnicalIndicators
 from app.classifiers.sr_signals import SRSignalGenerator
-from app.config import get_config
+from config import get_config
 
 router = APIRouter()
 
@@ -215,8 +215,10 @@ async def get_chart_data(
     """Get OHLCV chart data with regime classifications and indicators"""
     with DuckDBStorage() as storage:
         # Get order book data with OHLCV
-        # Filter out invalid prices (MNQ typically trades 20000-30000 range)
-        # Valid bars should have close price in reasonable range and low/high make sense
+        # Filter out invalid prices using config instrument range
+        config = get_config()
+        min_price = config.instrument.min_price
+        max_price = config.instrument.max_price
         df_ohlcv = storage.conn.execute(f"""
             SELECT
                 timestamp,
@@ -227,10 +229,10 @@ async def get_chart_data(
                 volume
             FROM order_book
             WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
-            AND close BETWEEN 20000 AND 30000
-            AND low BETWEEN 20000 AND 30000
-            AND high BETWEEN 20000 AND 35000
-            AND open BETWEEN 20000 AND 30000
+            AND close BETWEEN {min_price} AND {max_price}
+            AND low BETWEEN {min_price} AND {max_price}
+            AND high BETWEEN {min_price} AND {max_price + 5000}
+            AND open BETWEEN {min_price} AND {max_price}
             ORDER BY timestamp DESC
             LIMIT {limit}
         """).pl()
@@ -448,27 +450,10 @@ async def get_support_resistance(
 
         # Data is already in chronological order (ORDER BY timestamp ASC)
 
-        # Adjust min_touches based on timeframe for better level detection
-        # Use 2 touches for all timeframes to catch more valid levels
-        timeframe_min_touches = {
-            '5M': 2,
-            '15M': 2,
-            '1H': 2,
-            '4H': 2,
-            '1D': 2,
-        }
-        adjusted_min_touches = timeframe_min_touches.get(timeframe, min_touches)
-
-        # Use timeframe-specific swing windows
-        # Smaller window = more sensitive, detects more swing points
-        timeframe_swing_windows = {
-            '5M': 3,   # Very sensitive for intraday
-            '15M': 3,  # Sensitive for intraday
-            '1H': 3,   # More sensitive to catch more levels
-            '4H': 3,   # More sensitive to catch more levels
-            '1D': 5,   # Standard for daily
-        }
-        swing_window = timeframe_swing_windows.get(timeframe, 5)
+        # Get timeframe-specific min_touches and swing_window from config
+        sr_config = config.support_resistance
+        adjusted_min_touches = sr_config.min_touches_by_tf.get(timeframe, min_touches)
+        swing_window = sr_config.swing_window_by_tf.get(timeframe, sr_config.swing_window)
 
         print(f"[S/R] Using: min_touches={adjusted_min_touches}, swing_window={swing_window}, tolerance={price_tolerance:.4f}")
 

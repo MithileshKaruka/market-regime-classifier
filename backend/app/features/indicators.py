@@ -11,7 +11,9 @@ Implements common technical indicators:
 
 import polars as pl
 import logging
-from typing import Optional
+from typing import Optional, List
+
+from config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -201,8 +203,8 @@ class TechnicalIndicators:
     @staticmethod
     def calculate_trend_ema(
         df: pl.DataFrame,
-        fast_period: int = 12,
-        slow_period: int = 25,
+        fast_period: Optional[int] = None,
+        slow_period: Optional[int] = None,
         column: str = "close"
     ) -> pl.DataFrame:
         """
@@ -222,6 +224,12 @@ class TechnicalIndicators:
         Returns:
             DataFrame with ema_12, ema_25, trend, trend_strength columns
         """
+        # Load defaults from config if not provided
+        if fast_period is None or slow_period is None:
+            config = get_config()
+            fast_period = fast_period or config.trend_structure.ema_fast
+            slow_period = slow_period or config.trend_structure.ema_slow
+
         logger.info(f"Calculating Trend EMA ({fast_period}/{slow_period})")
 
         # Calculate fast and slow EMAs
@@ -259,26 +267,36 @@ class TechnicalIndicators:
     @staticmethod
     def calculate_all_indicators(
         df: pl.DataFrame,
-        rvwap_periods: list = [7, 30, 90, 200],
-        ema_periods: list = [20, 50, 100, 200],
-        bb_period: int = 20,
-        bb_std: float = 2.0,
-        atr_period: int = 14,
+        rvwap_periods: Optional[List[int]] = None,
+        ema_periods: Optional[List[int]] = None,
+        bb_period: Optional[int] = None,
+        bb_std: Optional[float] = None,
+        atr_period: Optional[int] = None,
     ) -> pl.DataFrame:
         """
         Calculate all indicators at once
 
         Args:
             df: DataFrame with OHLCV data
-            rvwap_periods: List of Rolling VWAP periods (default: 7, 30, 90, 200 days)
-            ema_periods: List of EMA periods to calculate (default: 20, 50, 100, 200)
-            bb_period: Bollinger Bands period
-            bb_std: Bollinger Bands standard deviation
-            atr_period: ATR period
+            rvwap_periods: List of Rolling VWAP periods (default from config)
+            ema_periods: List of EMA periods to calculate (default from config)
+            bb_period: Bollinger Bands period (default from config)
+            bb_std: Bollinger Bands standard deviation (default from config)
+            atr_period: ATR period (default from config)
 
         Returns:
             DataFrame with all indicator columns
         """
+        # Load defaults from config
+        config = get_config()
+        ind_config = config.indicators
+
+        rvwap_periods = rvwap_periods or ind_config.rvwap_periods
+        ema_periods = ema_periods or ind_config.ema_periods
+        bb_period = bb_period or ind_config.bb_period
+        bb_std = bb_std or ind_config.bb_std
+        atr_period = atr_period or ind_config.atr_period
+
         logger.info("Calculating all technical indicators")
 
         # VWAP

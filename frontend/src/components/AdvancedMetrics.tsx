@@ -1,6 +1,14 @@
 import { useEffect, useState } from 'react'
 import './AdvancedMetrics.css'
-import { API_BASE_URL } from '../config'
+import {
+  API_CONFIG,
+  COLORS,
+  POLLING_INTERVALS,
+  THRESHOLDS,
+  getBiasColor,
+  getAlertColor,
+  getToxicityColor,
+} from '../config'
 
 interface RVOLData {
   rvol: number
@@ -56,13 +64,13 @@ export default function AdvancedMetricsPanel({ timeframe }: AdvancedMetricsProps
 
   useEffect(() => {
     fetchMetrics()
-    const interval = setInterval(fetchMetrics, 5000) // Poll every 5 seconds
+    const interval = setInterval(fetchMetrics, POLLING_INTERVALS.advancedMetrics)
     return () => clearInterval(interval)
   }, [timeframe])
 
   const fetchMetrics = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/orderflow/advanced/${timeframe}`)
+      const response = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.advancedMetrics}/${timeframe}`)
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`)
       }
@@ -77,33 +85,14 @@ export default function AdvancedMetricsPanel({ timeframe }: AdvancedMetricsProps
     }
   }
 
-  const getBiasColor = (bias: string) => {
-    if (bias.includes('BULLISH')) return '#10b981'
-    if (bias.includes('BEARISH')) return '#ef4444'
-    return '#6b7280'
-  }
-
-  const getAlertColor = (level: string) => {
-    if (level === 'HIGH_ALERT') return '#ef4444'
-    if (level === 'ELEVATED') return '#f59e0b'
-    return '#6b7280'
-  }
-
-  const getToxicityColor = (level: string) => {
-    if (level === 'EXTREME') return '#ef4444'
-    if (level === 'HIGH') return '#f59e0b'
-    if (level === 'MODERATE') return '#eab308'
-    return '#10b981'
-  }
-
   const getConvictionBadge = (conviction: string) => {
     const colors: Record<string, string> = {
-      HIGH: '#10b981',
-      MEDIUM: '#f59e0b',
-      LOW: '#6b7280',
+      HIGH: COLORS.bullish,
+      MEDIUM: COLORS.alert.elevated,
+      LOW: COLORS.neutral,
     }
     return (
-      <span className="conviction-badge" style={{ backgroundColor: colors[conviction] || '#6b7280' }}>
+      <span className="conviction-badge" style={{ backgroundColor: colors[conviction] || COLORS.neutral }}>
         {conviction}
       </span>
     )
@@ -154,7 +143,7 @@ export default function AdvancedMetricsPanel({ timeframe }: AdvancedMetricsProps
         <div className="metric-section rvol-section">
           <div className="metric-header">
             <span className="metric-title">RVOL</span>
-            <span className="metric-value" style={{ color: metrics.rvol.rvol >= 1.5 ? '#10b981' : metrics.rvol.rvol < 0.5 ? '#6b7280' : '#e5e7eb' }}>
+            <span className="metric-value" style={{ color: metrics.rvol.rvol >= THRESHOLDS.rvol.high ? COLORS.bullish : metrics.rvol.rvol < THRESHOLDS.rvol.low ? COLORS.neutral : COLORS.text.primary }}>
               {metrics.rvol.rvol.toFixed(2)}x
             </span>
             {getConvictionBadge(metrics.rvol.conviction)}
@@ -165,7 +154,7 @@ export default function AdvancedMetricsPanel({ timeframe }: AdvancedMetricsProps
                 className="rvol-fill"
                 style={{
                   width: `${Math.min(100, metrics.rvol.rvol * 40)}%`,
-                  backgroundColor: metrics.rvol.rvol >= 1.5 ? '#10b981' : metrics.rvol.rvol >= 1.0 ? '#3b82f6' : '#6b7280',
+                  backgroundColor: metrics.rvol.rvol >= THRESHOLDS.rvol.high ? COLORS.bullish : metrics.rvol.rvol >= THRESHOLDS.rvol.medium ? COLORS.signals.lsf : COLORS.neutral,
                 }}
               />
               <div className="rvol-threshold" style={{ left: '60%' }} title="1.5x threshold" />
@@ -229,8 +218,8 @@ export default function AdvancedMetricsPanel({ timeframe }: AdvancedMetricsProps
             <span
               className="trend-value"
               style={{
-                color: metrics.vpin.recent_trend === 'RISING' ? '#ef4444' :
-                       metrics.vpin.recent_trend === 'FALLING' ? '#10b981' : '#6b7280'
+                color: metrics.vpin.recent_trend === 'RISING' ? COLORS.bearish :
+                       metrics.vpin.recent_trend === 'FALLING' ? COLORS.bullish : COLORS.neutral
               }}
             >
               {metrics.vpin.recent_trend === 'RISING' ? '↑' :
@@ -275,8 +264,8 @@ export default function AdvancedMetricsPanel({ timeframe }: AdvancedMetricsProps
               />
             </div>
             <div className="ldr-labels">
-              <span style={{ color: '#10b981' }}>Bids: {(metrics.ldr.total_bid_depth / 1000).toFixed(1)}K</span>
-              <span style={{ color: '#ef4444' }}>Asks: {(metrics.ldr.total_ask_depth / 1000).toFixed(1)}K</span>
+              <span style={{ color: COLORS.bullish }}>Bids: {(metrics.ldr.total_bid_depth / 1000).toFixed(1)}K</span>
+              <span style={{ color: COLORS.bearish }}>Asks: {(metrics.ldr.total_ask_depth / 1000).toFixed(1)}K</span>
             </div>
           </div>
           {(metrics.ldr.support_wall || metrics.ldr.resistance_wall) && (

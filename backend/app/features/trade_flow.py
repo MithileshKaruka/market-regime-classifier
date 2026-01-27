@@ -10,8 +10,10 @@ Databento Trades schema provides:
 - side: Trade aggressor side ('A' = ask/buy aggressor, 'B' = bid/sell aggressor)
 """
 import logging
-from typing import Optional
+from typing import Optional, Dict
 import polars as pl
+
+from config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -23,21 +25,21 @@ class TradeFlowCalculator:
     Trade side indicates aggressor:
     - 'A' (Ask): Buy aggressor - buyer lifted the ask (bullish)
     - 'B' (Bid): Sell aggressor - seller hit the bid (bearish)
+
+    All parameters can be overridden, but defaults are loaded from config.
     """
 
-    def __init__(self, cvd_window_config: dict = None):
+    def __init__(self, cvd_window_config: Optional[Dict[str, int]] = None):
         """Initialize calculator
 
         Args:
             cvd_window_config: Dict mapping timeframe to CVD rolling window size
+                              (defaults loaded from config)
         """
-        self.cvd_window_config = cvd_window_config or {
-            '5M': 288,
-            '15M': 96,
-            '1H': 24,
-            '4H': 30,
-            '1D': 5,
-        }
+        # Load defaults from config if not provided
+        config = get_config()
+        self.cvd_window_config = cvd_window_config or config.regime.cvd_windows
+
         logger.info(f"TradeFlowCalculator initialized with CVD windows: {self.cvd_window_config}")
 
     def calculate_delta(self, df: pl.DataFrame) -> pl.DataFrame:
