@@ -1,22 +1,22 @@
 """
-Reset database schema for OHLCV-first architecture
-Removes MBP-10 specific columns that are no longer used
+Reset database schema for ohlcv_ticks architecture
+Creates the unified ohlcv_ticks table as single source of truth
 """
 import sys
 from pathlib import Path
 
 # Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import duckdb
 
-DB_PATH = Path("backend/data/market_data.duckdb")
+DB_PATH = Path(__file__).parent.parent.parent / "data" / "market_data.duckdb"
 
 
 def reset_database():
-    """Drop and recreate tables with new OHLCV-focused schema"""
+    """Drop and recreate tables with ohlcv_ticks schema"""
     print("=" * 70)
-    print("  Database Schema Reset - OHLCV Architecture")
+    print("  Database Schema Reset - ohlcv_ticks Architecture")
     print("=" * 70)
 
     if not DB_PATH.exists():
@@ -30,16 +30,18 @@ def reset_database():
     try:
         # Drop existing tables
         print(f"[2/3] Dropping old tables...")
-        conn.execute("DROP TABLE IF EXISTS order_book")
+        conn.execute("DROP TABLE IF EXISTS ohlcv_ticks")
+        conn.execute("DROP TABLE IF EXISTS mbp_ticks")
+        conn.execute("DROP TABLE IF EXISTS order_book")  # Legacy table
         conn.execute("DROP TABLE IF EXISTS regimes")
         print(f"       Tables dropped successfully")
 
-        # Create new simplified schema
-        print(f"[3/3] Creating new OHLCV-focused schema...")
+        # Create new schema
+        print(f"[3/3] Creating ohlcv_ticks schema...")
 
-        # OHLCV table (simplified, no MBP-10 fields)
+        # ohlcv_ticks - single source of truth
         conn.execute("""
-            CREATE TABLE order_book (
+            CREATE TABLE ohlcv_ticks (
                 timestamp TIMESTAMP,
                 symbol VARCHAR,
                 timeframe VARCHAR,
@@ -48,15 +50,37 @@ def reset_database():
                 low DOUBLE,
                 close DOUBLE,
                 volume BIGINT,
-                dom_imbalance DOUBLE,     -- Will come from real-time MBP-10 only
-                cvd DOUBLE,               -- Will calculate from trades data
-                vwap DOUBLE,              -- Volume-weighted average price
-                PRIMARY KEY (timestamp, symbol, timeframe)
+                instant_delta BIGINT,
+                dom_imbalance DOUBLE,
+                total_bid_depth DOUBLE,
+                total_ask_depth DOUBLE,
+                cvd BIGINT,
+                PRIMARY KEY (symbol, timeframe, timestamp)
             )
         """)
-        print(f"       [OK] Created 'order_book' table (OHLCV + metrics)")
+        print(f"       [OK] Created 'ohlcv_ticks' table")
 
-        # Regime classifications (unchanged)
+        # mbp_ticks - raw tick data for aggregation
+        conn.execute("""
+            CREATE TABLE mbp_ticks (
+                timestamp TIMESTAMP,
+                symbol VARCHAR,
+                mid_price DOUBLE,
+                bid_price DOUBLE,
+                ask_price DOUBLE,
+                spread DOUBLE,
+                bid_size INTEGER,
+                ask_size INTEGER,
+                total_bid_depth BIGINT,
+                total_ask_depth BIGINT,
+                dom_imbalance DOUBLE,
+                delta BIGINT,
+                cvd BIGINT
+            )
+        """)
+        print(f"       [OK] Created 'mbp_ticks' table")
+
+        # Regime classifications
         conn.execute("""
             CREATE TABLE regimes (
                 timestamp TIMESTAMP,
@@ -65,28 +89,33 @@ def reset_database():
                 regime VARCHAR,
                 confidence DOUBLE,
                 key_signal VARCHAR,
-                dom_imbalance DOUBLE,
-                cvd DOUBLE,
-                vwap DOUBLE,
-                price DOUBLE,
                 PRIMARY KEY (timestamp, symbol, timeframe)
             )
         """)
         print(f"       [OK] Created 'regimes' table")
+
+        # Create index
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ohlcv_ticks_lookup
+            ON ohlcv_ticks (symbol, timeframe, timestamp)
+        """)
+        print(f"       [OK] Created index on ohlcv_ticks")
 
         conn.commit()
 
         print(f"\n{'='*70}")
         print(f"  Database Reset Complete!")
         print(f"{'='*70}")
-        print(f"\nNew schema:")
-        print(f"  - order_book: OHLCV + cvd + vwap + dom_imbalance")
+        print(f"\nSchema:")
+        print(f"  - ohlcv_ticks: OHLCV + orderflow (single source of truth)")
+        print(f"  - mbp_ticks: Raw MBP-1 tick data for aggregation")
         print(f"  - regimes: Regime classifications")
-        print(f"\nRemoved columns (MBP-10 specific):")
-        print(f"  - bid_px_00, bid_sz_00, ask_px_00, ask_sz_00")
-        print(f"  - mid_price, total_bid_volume, total_ask_volume, spread")
-        print(f"\nNext step:")
-        print(f"  Run: python backend/scripts/load_ohlcv.py")
+        print(f"\nNext steps:")
+        print(f"  # Load OHLCV data")
+        print(f"  python scripts/data/load_historical_data.py --ohlcv data/ohlcv.dbn.zst")
+        print(f"")
+        print(f"  # Load MBP-1 data (adds orderflow metrics)")
+        print(f"  python scripts/data/load_historical_data.py --mbp data/mbp1.dbn.zst")
 
     except Exception as e:
         print(f"\n[ERROR] Failed to reset database: {e}")

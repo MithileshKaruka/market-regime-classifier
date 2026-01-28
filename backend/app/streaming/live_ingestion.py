@@ -8,6 +8,7 @@ Raw MBP-1 data is archived to DBN files for backtesting.
 """
 import asyncio
 import logging
+from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Callable
@@ -91,10 +92,16 @@ class LiveDataIngestion:
             for symbol in self.symbols:
                 self.current_bars[tf][symbol] = None
 
-        # Running CVD per timeframe/symbol
-        self.running_cvd: Dict[str, Dict[str, int]] = {}
+        # Rolling CVD windows per timeframe (from config)
+        self.cvd_windows = getattr(config.regime, 'cvd_windows', {
+            "5M": 288, "15M": 96, "1H": 24, "4H": 30, "1D": 5
+        })
+
+        # Rolling delta buffers for CVD calculation (deque per timeframe/symbol)
+        self.delta_buffers: Dict[str, Dict[str, deque]] = {}
         for tf in self.timeframes:
-            self.running_cvd[tf] = {s: 0 for s in self.symbols}
+            window_size = self.cvd_windows.get(tf, 100)
+            self.delta_buffers[tf] = {s: deque(maxlen=window_size) for s in self.symbols}
 
         # Track previous quote for delta calculation
         self.prev_quotes: Dict[str, Dict[str, Any]] = {s: {} for s in self.symbols}
@@ -261,9 +268,10 @@ class LiveDataIngestion:
                 if current_bar is None or current_bar['timestamp'] != bar_ts:
                     # Save previous bar if exists (bar closed)
                     if current_bar is not None:
-                        # Update running CVD
-                        self.running_cvd[tf][symbol] += current_bar['instant_delta']
-                        current_bar['cvd'] = self.running_cvd[tf][symbol]
+                        # Add completed bar's delta to rolling buffer
+                        self.delta_buffers[tf][symbol].append(current_bar['instant_delta'])
+                        # Calculate rolling CVD from buffer
+                        current_bar['cvd'] = sum(self.delta_buffers[tf][symbol])
 
                         # Store completed bar
                         await self._store_completed_bar(tf, symbol, current_bar)
@@ -280,8 +288,8 @@ class LiveDataIngestion:
                     current_bar = self.update_bar_with_quote(current_bar, quote, delta, bar_ts)
                     self.current_bars[tf][symbol] = current_bar
 
-                # Update CVD on current bar
-                current_bar['cvd'] = self.running_cvd[tf][symbol] + current_bar['instant_delta']
+                # Update rolling CVD on current bar (historical + current bar's delta)
+                current_bar['cvd'] = sum(self.delta_buffers[tf][symbol]) + current_bar['instant_delta']
 
                 # Update cache
                 self.cache.update_bar(tf, symbol, current_bar)

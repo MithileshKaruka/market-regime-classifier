@@ -40,6 +40,7 @@ backend/data/archive/
 # OS
 .DS_Store
 Thumbs.db
+nul
 
 # Logs
 *.log
@@ -74,3 +75,6 @@ htmlcov/
 
 # Claude Code
 .claude/
+
+# keys
+*.pem

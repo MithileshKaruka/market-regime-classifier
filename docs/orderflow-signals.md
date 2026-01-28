@@ -237,20 +237,41 @@ Three primary signals used in context-aware scoring for trade timing.
 
 ## Data Sources
 
-### MBP-1 (Market-by-Price Level 1)
-- Source: Quote data from Databento
-- Provides: Best bid/ask prices and sizes
-- Used for: DOM imbalance calculation
+All data flows through the `ohlcv_ticks` table, which is the single source of truth.
 
-### Trades Data
-- Source: Trade prints from Databento
-- Provides: Executed trades with aggressor side
-- Used for: CVD (Cumulative Volume Delta) - true buying/selling pressure
+### Historical Data
+- **Source**: Databento OHLCV-1M and MBP-1 DBN files
+- **Loaded via**: `scripts/data/load_historical_data.py`
+- **Contains**: OHLCV + orderflow metrics (from MBP-1)
 
-### OHLCV
-- Source: Aggregated from MBP-1 data
-- Provides: Open, High, Low, Close, Volume per bar
-- Used for: Price patterns, EMAs, market structure, volume metrics
+### Live Data
+- **Source**: Databento MBP-1 (top-of-book quotes)
+- **Streamed via**: `app/streaming/live_ingestion.py`
+- **Contains**: Full OHLCV + orderflow metrics
+
+### Orderflow Metrics (Live Only)
+
+| Metric | Calculation | Use |
+|--------|-------------|-----|
+| DOM Imbalance | bid_size / (bid_size + ask_size) | Order book pressure |
+| Instant Delta | Inferred from quote size changes | Bar buying/selling |
+| CVD | Cumulative sum of instant_delta | Trend confirmation |
+
+### Database Schema
+
+```sql
+ohlcv_ticks (
+    timestamp TIMESTAMP,
+    symbol VARCHAR,
+    timeframe VARCHAR,
+    open, high, low, close DOUBLE,
+    volume BIGINT,
+    instant_delta BIGINT,      -- NULL for historical
+    dom_imbalance DOUBLE,      -- NULL for historical
+    cvd BIGINT,                -- NULL for historical
+    PRIMARY KEY (symbol, timeframe, timestamp)
+)
+```
 
 ---
 
@@ -285,7 +306,9 @@ features/
 ├── agent_bias.py            # Agent Bias Score calculator (main regime classifier)
 ├── orderflow_signals.py     # Signal detection (Absorption, Delta Unwind, Exhaustion, OBI)
 ├── orderflow_metrics.py     # RVOL, VPIN, LDR calculations
-└── indicators.py            # Technical indicators (EMA, ATR, Bollinger Bands, etc.)
+├── order_flow.py            # OrderFlowCalculator for MBP processing
+├── indicators.py            # Technical indicators (EMA, ATR, Bollinger Bands, etc.)
+└── support_resistance.py    # S/R level detection
 ```
 
 ---

@@ -14,13 +14,37 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import databento as db
 import polars as pl
-from config import get_databento_config
+from config import get_databento_config, get_config
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+# CVD rolling window sizes per timeframe
+CVD_WINDOWS = {
+    "5M": 288,   # 24 hours
+    "15M": 96,   # 24 hours
+    "1H": 24,    # 24 hours
+    "4H": 30,    # 5 days
+    "1D": 5,     # 5 days
+}
+
+# CME session offset (18:00 ET)
+CME_SESSION_OFFSET_HOURS = 6
+
+
+def _load_cvd_windows():
+    """Load CVD window sizes from config"""
+    global CVD_WINDOWS
+    try:
+        config = get_config()
+        if hasattr(config, 'regime') and hasattr(config.regime, 'cvd_windows'):
+            CVD_WINDOWS = config.regime.cvd_windows
+    except Exception:
+        pass
 
 
 class DBNLoader:
@@ -32,6 +56,8 @@ class DBNLoader:
         Args:
             archive_dir: Path to DBN archive directory. Defaults to config.
         """
+        _load_cvd_windows()
+
         if archive_dir:
             self.archive_dir = Path(archive_dir)
         else:
@@ -215,29 +241,59 @@ class DBNLoader:
                 pl.lit(0).alias("delta"),
             ])
 
-        # Aggregate to OHLCV
-        df_ohlcv = df.group_by_dynamic(
-            "timestamp",
-            every=interval,
-            closed="left",
-            label="left"
-        ).agg([
+        # For 4H and 1D, use CME session boundaries (18:00 ET)
+        if timeframe in ("4H", "1D"):
+            df = df.with_columns([
+                (pl.col("timestamp") + pl.duration(hours=CME_SESSION_OFFSET_HOURS)).alias("shifted_ts")
+            ])
+            ts_col_for_group = "shifted_ts"
+        else:
+            ts_col_for_group = "timestamp"
+
+        # Build aggregation expressions
+        agg_exprs = [
             pl.col("mid_price").first().alias("open"),
             pl.col("mid_price").max().alias("high"),
             pl.col("mid_price").min().alias("low"),
             pl.col("mid_price").last().alias("close"),
             pl.count().alias("volume"),
             pl.col("delta").sum().alias("instant_delta"),
-            # Calculate DOM imbalance if sizes available
-            (
-                pl.col("bid_sz_00").mean() /
-                (pl.col("bid_sz_00").mean() + pl.col("ask_sz_00").mean())
-            ).alias("dom_imbalance") if "bid_sz_00" in df.columns else pl.lit(0.5).alias("dom_imbalance"),
-        ])
+        ]
 
-        # Add CVD (cumulative delta)
+        # Add DOM imbalance and depth if sizes available
+        if "bid_sz_00" in df.columns:
+            agg_exprs.extend([
+                (pl.col("bid_sz_00").mean() / (pl.col("bid_sz_00").mean() + pl.col("ask_sz_00").mean())).alias("dom_imbalance"),
+                pl.col("bid_sz_00").mean().alias("total_bid_depth"),
+                pl.col("ask_sz_00").mean().alias("total_ask_depth"),
+            ])
+        else:
+            agg_exprs.extend([
+                pl.lit(0.5).alias("dom_imbalance"),
+                pl.lit(None).cast(pl.Float64).alias("total_bid_depth"),
+                pl.lit(None).cast(pl.Float64).alias("total_ask_depth"),
+            ])
+
+        # Aggregate to OHLCV
+        df_ohlcv = df.group_by_dynamic(
+            ts_col_for_group,
+            every=interval,
+            closed="left",
+            label="left"
+        ).agg(agg_exprs)
+
+        # Shift timestamp back for CME session alignment
+        if timeframe in ("4H", "1D"):
+            df_ohlcv = df_ohlcv.with_columns([
+                (pl.col("shifted_ts") - pl.duration(hours=CME_SESSION_OFFSET_HOURS)).alias("timestamp")
+            ]).drop("shifted_ts")
+        else:
+            df_ohlcv = df_ohlcv.rename({ts_col_for_group: "timestamp"})
+
+        # Add rolling CVD (windowed, not cumulative)
+        cvd_window = CVD_WINDOWS.get(timeframe, 100)
         df_ohlcv = df_ohlcv.with_columns([
-            pl.col("instant_delta").cum_sum().alias("cvd"),
+            pl.col("instant_delta").rolling_sum(window_size=cvd_window, min_periods=1).alias("cvd"),
             pl.lit(symbol).alias("symbol"),
             pl.lit(timeframe).alias("timeframe"),
         ])
@@ -254,6 +310,8 @@ class DBNLoader:
             "volume",
             "instant_delta",
             "dom_imbalance",
+            "total_bid_depth",
+            "total_ask_depth",
             "cvd",
         ])
 

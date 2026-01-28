@@ -5,7 +5,7 @@
 // API Configuration
 // ============================================================================
 export const API_CONFIG = {
-  baseUrl: 'http://127.0.0.1:8000',
+  baseUrl: import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000',
   endpoints: {
     chart: '/api/v2/chart',
     supportResistance: '/api/regime/support-resistance',

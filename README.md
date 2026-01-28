@@ -17,21 +17,28 @@ source venv/bin/activate  # or `venv\Scripts\activate` on Windows
 pip install -r requirements.txt
 ```
 
-### 2. Load Data
+### 2. Configure Databento API
 ```bash
-cd backend
-python scripts/load_all_data.py --all
+# Copy the example secrets file
+cp config/secrets.yaml.example config/secrets.yaml
+
+# Edit and add your Databento API key
 ```
 
-This runs the complete data pipeline:
-- Load OHLCV candlestick data
-- Load MBP tick data (DOM imbalance)
-- Load trades data (CVD/delta)
-- Update order flow metrics
+### 3. Load Historical Data
+```bash
+cd backend
 
-See [backend/data/README.md](backend/data/README.md) for detailed data ingestion steps.
+# Load OHLCV data (price history)
+python scripts/data/load_historical_data.py --ohlcv data/glbx-mdp3.ohlcv-1m.dbn.zst
 
-### 3. Start Backend
+# Load MBP-1 data (orderflow metrics)
+python scripts/data/load_historical_data.py --mbp data/glbx-mdp3.mbp-1.dbn.zst
+```
+
+This loads historical data from Databento DBN files (supports `.dbn` and `.dbn.zst`).
+
+### 4. Start Backend
 ```bash
 cd backend
 python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
@@ -39,7 +46,7 @@ python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 Backend available at: **http://localhost:8000**
 
-### 4. Start Frontend
+### 5. Start Frontend
 ```bash
 cd frontend
 npm install
@@ -58,6 +65,7 @@ Frontend available at: **http://localhost:5173**
 - **Charts**: TradingView Lightweight Charts
 - **Data Source**: Databento (CME MDP 3.0)
 - **Agent Framework**: LangGraph (for trading decisions)
+- **Real-time**: WebSocket for live chart updates
 
 ### Directory Structure
 ```
@@ -69,13 +77,20 @@ market-regime-classifier/
 │   │   ├── classifiers/   # Regime classification
 │   │   ├── data/          # Database storage layer
 │   │   ├── features/      # Indicators & order flow
-│   │   ├── services/      # Storage services
 │   │   └── streaming/     # Live data ingestion
 │   ├── config/            # Centralized configuration
 │   │   ├── config.py      # Dataclass definitions
-│   │   └── agent_config.yaml  # All tunable parameters
-│   ├── scripts/           # Data loading & maintenance
-│   └── data/              # DuckDB database & raw data files
+│   │   ├── agent_config.yaml  # Tunable parameters
+│   │   ├── databento_config.yaml  # Streaming settings
+│   │   └── secrets.yaml   # API keys (gitignored)
+│   └── scripts/           # Data loading & maintenance
+│       ├── backtesting/   # Backtest scripts & DBN loader
+│       ├── data/          # Historical data loader
+│       └── maintenance/   # Gap recovery & cleanup jobs
+├── docs/                  # Documentation
+│   ├── orderflow-signals.md   # Bias scoring & signals
+│   ├── data-pipeline.md       # Data loading & recovery
+│   └── database-schema.md     # DuckDB schema
 ├── frontend/
 │   └── src/
 │       ├── components/    # React components
@@ -83,11 +98,17 @@ market-regime-classifier/
 └── README.md
 ```
 
+### Documentation
+See the [docs/](docs/) folder for detailed documentation:
+- [Orderflow Signals](docs/orderflow-signals.md) - Bias scoring system and signal detection
+- [Data Pipeline](docs/data-pipeline.md) - Data loading, streaming, and gap recovery
+- [Database Schema](docs/database-schema.md) - DuckDB schema and data retention
+
 ## Features
 
 ### Order Flow Analysis
-- **DOM Imbalance**: Real-time order book imbalance from MBP-1/MBP-10 data
-- **CVD (Cumulative Volume Delta)**: Rolling window CVD from actual trade executions
+- **DOM Imbalance**: Real-time order book imbalance from MBP-1 data
+- **CVD (Cumulative Volume Delta)**: Rolling window CVD from quote changes
 - **RVOL**: Relative Volume with Point of Control (POC)
 - **VPIN**: Volume-Synchronized Probability of Informed Trading
 - **LDR**: Liquidity Depth Ratio for wall detection
@@ -96,6 +117,8 @@ market-regime-classifier/
 - **Absorption**: Large volume absorbed at stable price levels
 - **LSF (Liquidity Sweep Fade)**: Stop run followed by snap-back reversals
 - **OBI (Order Book Imbalance)**: Weighted imbalance across order book levels
+- **Delta Unwind**: CVD extreme reversal signals
+- **Exhaustion**: High volume with minimal price movement
 
 ### Bias Scoring System (0-100)
 Combines three signal categories into a unified trading bias:
@@ -103,8 +126,8 @@ Combines three signal categories into a unified trading bias:
 | Category | Weight | Components |
 |----------|--------|------------|
 | Trend & Structure | 20% | EMA crossovers, market structure (HH/HL vs LH/LL), S/R levels |
-| Market Intensity | 30% | RVOL (volume conviction) + VPIN (informed trading) |
-| Order Flow Alpha | 50% | OBI, LDR, Absorption, LSF signals |
+| Market Intensity | 20% | RVOL (volume conviction) + VPIN (informed trading) |
+| Order Flow Alpha | 60% | OBI, LDR, Absorption, Delta Unwind, Exhaustion signals |
 
 ### Score Interpretation
 | Score Range | Mode | Action |
@@ -139,8 +162,8 @@ All parameters are centralized in `backend/config/agent_config.yaml`. Key sectio
 ```yaml
 scoring:
   trend_structure_weight: 20
-  market_intensity_weight: 30
-  orderflow_alpha_weight: 50
+  market_intensity_weight: 20
+  orderflow_alpha_weight: 60
 ```
 
 ### Order Flow Thresholds
@@ -149,8 +172,8 @@ orderflow_alpha:
   obi_strong_imbalance: 1.5
   obi_moderate_imbalance: 1.2
   cvd_threshold: 5000
-  absorption_volume_mult: 1.3
-  lsf_spike_mult: 1.5
+  absorption_volume_mult: 2.0
+  delta_zscore_threshold: 2.0
 ```
 
 ### Instrument Settings
@@ -161,8 +184,6 @@ instrument:
   min_price: 18000
   max_price: 32000
 ```
-
-See [backend/config/agent_config.yaml](backend/config/agent_config.yaml) for all available parameters.
 
 ## API Endpoints
 
@@ -201,6 +222,13 @@ GET /api/regime/signals/{timeframe}
 GET /api/orderflow/agent/{timeframe}?position=FLAT
 ```
 
+### WebSocket (Live Updates)
+```
+WS /ws/live
+```
+
+Events: `bar_update`, `bar_close`, `signal`, `regime_change`
+
 ### Health Check
 ```
 GET /api/health
@@ -208,23 +236,10 @@ GET /api/health
 
 ## Data Pipeline
 
-### Historical Data
-1. **OHLCV**: Candlestick data from Databento OHLCV-1M schema
-2. **MBP**: Order book data (MBP-1 for live, MBP-10 for historical)
-3. **Trades**: Individual trade executions with aggressor side
+### Database Schema
 
-### Live Streaming
-```python
-# Subscribes to both schemas for real-time data
-client.subscribe(dataset="GLBX.MDP3", schema="mbp-1", symbols=["MNQ"])
-client.subscribe(dataset="GLBX.MDP3", schema="trades", symbols=["MNQ"])
-```
+The system uses a single `ohlcv_ticks` table as the source of truth:
 
-See [backend/data/README.md](backend/data/README.md) for complete data ingestion documentation.
-
-## Database Schema
-
-### `order_book` Table
 | Column | Type | Description |
 |--------|------|-------------|
 | timestamp | TIMESTAMP | Bar start time |
@@ -232,25 +247,81 @@ See [backend/data/README.md](backend/data/README.md) for complete data ingestion
 | timeframe | VARCHAR | Timeframe (5M, 15M, 1H, 4H, 1D) |
 | open/high/low/close | DOUBLE | OHLC prices |
 | volume | BIGINT | Bar volume |
+| instant_delta | BIGINT | Bar delta (buy - sell volume) |
 | dom_imbalance | DOUBLE | Order book imbalance (0-1) |
-| cvd | DOUBLE | Rolling Cumulative Volume Delta |
-| vwap | DOUBLE | Volume-Weighted Average Price |
+| total_bid_depth | DOUBLE | Average bid depth |
+| total_ask_depth | DOUBLE | Average ask depth |
+| cvd | BIGINT | Cumulative Volume Delta |
 
-### `regimes` Table
-| Column | Type | Description |
-|--------|------|-------------|
-| timestamp | TIMESTAMP | Classification time |
-| regime | VARCHAR | BULLISH, BEARISH, NEUTRAL |
-| confidence | DOUBLE | Classification confidence |
-| key_signal | VARCHAR | Primary signal driver |
+### Historical Data
+- **Source**: Databento `.dbn.zst` files (OHLCV-1M and MBP-1)
+- **Loader**: `scripts/data/load_historical_data.py`
+- **Storage**: DuckDB `ohlcv_ticks` table
 
-### `trades` Table
-| Column | Type | Description |
-|--------|------|-------------|
-| timestamp | TIMESTAMP | Trade timestamp |
-| price | DOUBLE | Trade price |
-| size | INTEGER | Trade size |
-| side | VARCHAR | Aggressor ('A' = buy, 'B' = sell) |
+```bash
+# Load OHLCV (price data, NULL orderflow)
+python scripts/data/load_historical_data.py --ohlcv data/ohlcv.dbn.zst
+
+# Load MBP-1 (adds orderflow metrics: delta, DOM, CVD)
+python scripts/data/load_historical_data.py --mbp data/mbp1.dbn.zst
+```
+
+### Live Streaming
+```bash
+cd backend
+python -m app.streaming.live_ingestion
+```
+
+The live ingestion service:
+- Subscribes to MBP-1 schema from Databento
+- Aggregates ticks into OHLCV bars with orderflow metrics
+- Stores completed bars to `ohlcv_ticks`
+- Pushes real-time updates via WebSocket
+- Archives raw data to `.dbn.zst` files for backtesting
+
+### Backtesting
+```python
+from scripts.backtesting.dbn_loader import DBNLoader
+
+loader = DBNLoader()
+df = loader.load_for_backtest(
+    start_date="2024-01-01",
+    end_date="2024-01-31",
+    timeframe="15M"
+)
+```
+
+### Weekly Maintenance
+Run every Friday at 4:30 PM CST (after CME close):
+```bash
+python scripts/maintenance/weekly_maintenance.py
+```
+
+Tasks:
+- Clean up DBN archives older than 60 days
+- Clean up OHLCV data older than 5 years
+- Vacuum database
+
+### Gap Detection & Backfill
+If live streaming was interrupted, detect and backfill missing data:
+```bash
+# Check for gaps
+python scripts/maintenance/backfill_gaps.py --check
+
+# Backfill gaps from Databento (downloads OHLCV + MBP-1)
+python scripts/maintenance/backfill_gaps.py --backfill
+
+# Backfill specific date range
+python scripts/maintenance/backfill_gaps.py --backfill --start 2024-01-15 --end 2024-01-16
+
+# Backfill only orderflow (MBP-1) if OHLCV already exists
+python scripts/maintenance/backfill_gaps.py --backfill --mbp-only
+```
+
+The backfill utility:
+- Detects unexpected gaps in `ohlcv_ticks` (ignores weekends/maintenance)
+- Downloads OHLCV-1M (price + volume) and MBP-1 (orderflow) from Databento
+- Loads and aggregates with correct rolling CVD windows
 
 ## Development
 
@@ -263,21 +334,15 @@ pytest
 ### Verifying Data
 ```bash
 cd backend
-python scripts/verify_data.py
-```
-
-### Database Status
-```bash
-cd backend
-python scripts/load_all_data.py --status
+python scripts/utils/verify_data.py
 ```
 
 ## Troubleshooting
 
 ### No Order Flow Signals?
-Make sure to run the orderflow metrics update after loading data:
-```bash
-python scripts/update_orderflow_metrics.py
+Check that `ohlcv_ticks` has orderflow data:
+```sql
+SELECT COUNT(*) FROM ohlcv_ticks WHERE instant_delta IS NOT NULL;
 ```
 
 ### Price Data Looks Wrong?
