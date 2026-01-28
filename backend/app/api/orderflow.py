@@ -124,43 +124,35 @@ async def get_orderflow_signals(
     5. **Exhaustion**: High volume with minimal price movement
     """
     with DuckDBStorage() as storage:
-        # Get OHLCV + order flow data
-        # Only fetch bars that have real DOM data (dom_imbalance != 0.5)
-        # Order by ASC to get chronological order
+        # Query pre-aggregated OHLCV data from ohlcv_ticks table
+        # This table is pre-computed from mbp_ticks with accurate DOM/delta data
+        # Get most recent N bars, then order chronologically for signal detection
         df = storage.conn.execute(f"""
-            SELECT
-                timestamp,
-                open,
-                high,
-                low,
-                close,
-                volume,
-                dom_imbalance,
-                cvd as instant_delta
-            FROM order_book
-            WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
-            AND dom_imbalance != 0.5
-            ORDER BY timestamp ASC
-            LIMIT {limit}
+            SELECT * FROM (
+                SELECT
+                    timestamp,
+                    open,
+                    high,
+                    low,
+                    close,
+                    volume,
+                    instant_delta,
+                    dom_imbalance,
+                    total_bid_depth,
+                    total_ask_depth
+                FROM ohlcv_ticks
+                WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
+                ORDER BY timestamp DESC
+                LIMIT {limit}
+            ) ORDER BY timestamp ASC
         """).pl()
 
         if len(df) == 0:
-            # Return empty signals if no real orderflow data
             return OrderflowSignalsResponse(
                 timeframe=timeframe,
                 signals=[],
                 total_count=0,
             )
-
-        # Data is already in chronological order
-
-        # Add depth columns (use dom_imbalance to estimate depth ratio)
-        # total_bid_depth and total_ask_depth approximated from dom_imbalance
-        # If DOM = 0.6, bid_depth ~= 1.5 * ask_depth, so ratio = 3:2
-        df = df.with_columns([
-            (pl.col("volume") * pl.col("dom_imbalance")).alias("total_bid_depth"),
-            (pl.col("volume") * (1 - pl.col("dom_imbalance"))).alias("total_ask_depth"),
-        ])
 
         # Initialize detector with config values
         config = get_config()
@@ -228,7 +220,7 @@ async def get_simplified_metrics():
             # Get latest DOM imbalance for each timeframe
             df = storage.conn.execute(f"""
                 SELECT timestamp, dom_imbalance
-                FROM order_book
+                FROM ohlcv_ticks
                 WHERE symbol = 'MNQ' AND timeframe = '{tf}'
                 ORDER BY timestamp DESC
                 LIMIT 1
@@ -255,29 +247,30 @@ async def get_simplified_metrics():
                     timestamp=row["timestamp"],
                 ))
 
-        # Get daily VWAP
+        # Calculate daily VWAP from recent bars
         vwap_df = storage.conn.execute("""
-            SELECT vwap, close as current_price
-            FROM order_book
+            SELECT
+                SUM((high + low + close) / 3 * volume) / SUM(volume) as vwap,
+                (SELECT close FROM ohlcv_ticks WHERE symbol = 'MNQ' AND timeframe = '1D' ORDER BY timestamp DESC LIMIT 1) as current_price
+            FROM ohlcv_ticks
             WHERE symbol = 'MNQ' AND timeframe = '1D'
-            ORDER BY timestamp DESC
-            LIMIT 1
+            AND timestamp >= (SELECT MAX(timestamp) - INTERVAL '1 day' FROM ohlcv_ticks WHERE symbol = 'MNQ' AND timeframe = '1D')
         """).pl()
 
-        if len(vwap_df) == 0:
+        if len(vwap_df) == 0 or vwap_df["vwap"][0] is None:
             # Fall back to 1H data if no daily
             vwap_df = storage.conn.execute("""
-                SELECT vwap, close as current_price
-                FROM order_book
+                SELECT
+                    SUM((high + low + close) / 3 * volume) / SUM(volume) as vwap,
+                    (SELECT close FROM ohlcv_ticks WHERE symbol = 'MNQ' AND timeframe = '1H' ORDER BY timestamp DESC LIMIT 1) as current_price
+                FROM ohlcv_ticks
                 WHERE symbol = 'MNQ' AND timeframe = '1H'
-                ORDER BY timestamp DESC
-                LIMIT 1
+                AND timestamp >= (SELECT MAX(timestamp) - INTERVAL '1 day' FROM ohlcv_ticks WHERE symbol = 'MNQ' AND timeframe = '1H')
             """).pl()
 
-        if len(vwap_df) > 0:
-            vwap_row = vwap_df.row(0, named=True)
-            vwap = vwap_row["vwap"]
-            price = vwap_row["current_price"]
+        if len(vwap_df) > 0 and vwap_df["vwap"][0] is not None:
+            vwap = vwap_df["vwap"][0]
+            price = vwap_df["current_price"][0]
 
             if vwap and vwap > 0:
                 position = "ABOVE" if price > vwap else "BELOW"
@@ -342,7 +335,7 @@ async def get_advanced_metrics(
                 volume,
                 dom_imbalance,
                 cvd as instant_delta
-            FROM order_book
+            FROM ohlcv_ticks
             WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
             ORDER BY timestamp ASC
             LIMIT {limit}
@@ -444,13 +437,21 @@ class MarketIntensityResponse(BaseModel):
 
 
 class OrderFlowAlphaResponse(BaseModel):
-    """Order Flow Alpha component (50% weight)"""
+    """Order Flow Alpha component (60% weight) - Context-aware scoring
+
+    When PRIMARY SIGNAL is active (Absorption/Exhaustion/Delta Unwind):
+    - Primary: 50%, LDR: 20%, OBI: 15%, CVD: 15%
+
+    When NO PRIMARY SIGNAL (BASE mode):
+    - LDR: 33%, OBI: 33%, CVD: 34%
+    """
     score: float
-    obi_score: float
+    active_mode: str  # ABSORPTION, EXHAUSTION, DELTA_UNWIND, or BASE
+    primary_score: float  # Primary signal contribution
     ldr_score: float
-    absorption_score: float
-    lsf_score: float
-    active_signals: List[str]
+    obi_score: float
+    cvd_score: float
+    active_signals: List[str]  # All active signals in strength order
     details: str
 
 
@@ -478,8 +479,14 @@ async def get_agent_bias(
 
     Returns a 0-100 score combining:
     - **Trend & Structure (20%)**: EMA 12/25 trend + market structure (HH/HL vs LH/LL) + S/R position
-    - **Market Intensity (30%)**: RVOL + VPIN - measures conviction behind moves
-    - **Order Flow Alpha (50%)**: OBI + LDR + Absorption + LSF - what big money is doing
+    - **Market Intensity (20%)**: RVOL + VPIN - measures conviction behind moves
+    - **Order Flow Alpha (60%)**: Context-aware scoring based on active primary signals
+
+    Order Flow Alpha Modes:
+    - **DELTA_UNWIND**: Primary 50% + LDR 20% + OBI 15% + CVD 15% (86.7% hit rate)
+    - **EXHAUSTION**: Primary 50% + LDR 20% + OBI 15% + CVD 15% (81.8% hit rate)
+    - **ABSORPTION**: Primary 50% + LDR 20% + OBI 15% + CVD 15% (66.7% hit rate)
+    - **BASE**: LDR 33% + OBI 33% + CVD 34% (no primary signal active)
 
     Score Interpretation:
     - **0-30 (HIGH_BEARISH)**: Short entries only, ignore support bounces
@@ -500,7 +507,7 @@ async def get_agent_bias(
                 volume,
                 dom_imbalance,
                 cvd as instant_delta
-            FROM order_book
+            FROM ohlcv_ticks
             WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
             ORDER BY timestamp ASC
             LIMIT {limit}
@@ -521,7 +528,7 @@ async def get_agent_bias(
         vpin_metrics = metrics_calc.calculate_vpin(df)
         ldr_metrics = metrics_calc.calculate_ldr(df)
 
-        # Get orderflow signals for absorption and LSF using config
+        # Get orderflow signals using config
         config = get_config()
         detector = OrderflowSignalDetector(
             timeframe=timeframe,
@@ -529,6 +536,11 @@ async def get_agent_bias(
             lsf_sweep_threshold_pct=config.orderflow_alpha.lsf_sweep_threshold_pct,
             lsf_snapback_pct=config.orderflow_alpha.lsf_snapback_pct,
             obi_threshold=config.orderflow_alpha.obi_threshold,
+            delta_zscore_threshold=config.orderflow_alpha.delta_zscore_threshold,
+            delta_unwind_pct=config.orderflow_alpha.delta_unwind_pct,
+            delta_unwind_bars=config.orderflow_alpha.delta_unwind_bars,
+            exhaustion_volume_mult=config.orderflow_alpha.exhaustion_volume_mult,
+            exhaustion_range_ratio_max=config.orderflow_alpha.exhaustion_range_ratio_max,
             lookback_bars=config.orderflow_alpha.absorption_lookback,
         )
 
@@ -539,12 +551,15 @@ async def get_agent_bias(
             (pl.col("volume") * (1 - pl.col("dom_imbalance"))).alias("total_ask_depth"),
         ])
 
+        # Detect primary signals (Absorption, Delta Unwind, Exhaustion)
         absorption_signals = detector.detect_absorption(recent_df)
-        lsf_signals = detector.detect_lsf(recent_df)
+        delta_unwind_signals = detector.detect_delta_unwind(recent_df)
+        exhaustion_signals = detector.detect_exhaustion(recent_df)
 
         # Convert signals to dicts
         abs_dicts = [{"direction": s.direction.value, "strength": s.strength} for s in absorption_signals]
-        lsf_dicts = [{"direction": s.direction.value, "strength": s.strength} for s in lsf_signals]
+        du_dicts = [{"direction": s.direction.value, "strength": s.strength} for s in delta_unwind_signals]
+        exh_dicts = [{"direction": s.direction.value, "strength": s.strength} for s in exhaustion_signals]
 
         # Get S/R levels
         sr_levels = None
@@ -571,7 +586,8 @@ async def get_agent_bias(
             obi_ratio=ldr_metrics.ldr if ldr_metrics else None,  # Using LDR as OBI proxy
             ldr=ldr_metrics.ldr if ldr_metrics else None,
             absorption_signals=abs_dicts,
-            lsf_signals=lsf_dicts,
+            delta_unwind_signals=du_dicts,
+            exhaustion_signals=exh_dicts,
         )
 
         return AgentBiasResponse(
@@ -599,10 +615,11 @@ async def get_agent_bias(
             ),
             orderflow_alpha=OrderFlowAlphaResponse(
                 score=bias_result.orderflow_alpha.score,
-                obi_score=bias_result.orderflow_alpha.obi_score,
+                active_mode=bias_result.orderflow_alpha.active_mode,
+                primary_score=bias_result.orderflow_alpha.primary_score,
                 ldr_score=bias_result.orderflow_alpha.ldr_score,
-                absorption_score=bias_result.orderflow_alpha.absorption_score,
-                lsf_score=bias_result.orderflow_alpha.lsf_score,
+                obi_score=bias_result.orderflow_alpha.obi_score,
+                cvd_score=bias_result.orderflow_alpha.cvd_score,
                 active_signals=bias_result.orderflow_alpha.active_signals,
                 details=bias_result.orderflow_alpha.details,
             ),

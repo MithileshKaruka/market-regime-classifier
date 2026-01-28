@@ -14,6 +14,10 @@ ENV/
 *.env
 !.env.example
 
+# Secrets (API keys)
+backend/config/secrets.yaml
+!backend/config/secrets.yaml.example
+
 # Data files (large binary files from Databento)
 backend/data/*.parquet
 backend/data/*.csv
@@ -21,6 +25,7 @@ backend/data/*.duckdb
 backend/data/*.dbn
 backend/data/*.dbn.zst
 backend/data/*.json
+backend/data/archive/
 *.duckdb
 *.duckdb.backup
 *.db

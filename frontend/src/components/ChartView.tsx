@@ -346,108 +346,128 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
 
         // Always request all indicators so we have the data available for toggling
         const allIndicators = ALL_INDICATOR_KEYS.join(',')
-        const response = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.chart}/${timeframe}?limit=${CHART_CONFIG.initialLoad}&offset=0&indicators=${allIndicators}`)
+        const priceRangeParam = priceRangePct !== THRESHOLDS.srRange.default ? `?price_range_pct=${priceRangePct}` : ''
 
-        if (!response.ok) {
+        // Fetch ALL data in PARALLEL to prevent visual flash when switching timeframes
+        const [chartResponse, signalsResponse, srResponse] = await Promise.all([
+          fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.chart}/${timeframe}?limit=${CHART_CONFIG.initialLoad}&offset=0&indicators=${allIndicators}`),
+          fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.orderflowSignals}/${timeframe}?limit=${CHART_CONFIG.signalsLimit}`),
+          fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.supportResistance}/${timeframe}${priceRangeParam}`)
+        ])
+
+        if (!chartResponse.ok) {
           throw new Error('Failed to fetch chart data')
         }
 
-        const data = await response.json()
+        // Parse all responses before rendering anything
+        const data = await chartResponse.json()
         const bars: ChartBar[] = data.bars
+
+        let signals: OrderflowSignal[] = []
+        if (signalsResponse.ok) {
+          const signalsData = await signalsResponse.json()
+          signals = signalsData.signals || []
+        }
+
+        let srData = null
+        if (srResponse.ok) {
+          srData = await srResponse.json()
+        }
+
+        console.log(`[Chart] Loaded ${bars.length} bars, ${signals.length} signals, S/R: ${srData ? 'yes' : 'no'}`)
+
+        // Update state
         setTotalBars(data.total_count)
         setLoadedBars(bars)
         loadedBarsRef.current = bars
+        setOrderflowSignals(signals)
 
-        console.log(`[Chart] Loaded ${bars.length} bars, total available: ${data.total_count}`)
+        // Clear old price lines BEFORE updating chart
+        priceLinesRef.current.forEach(line => {
+          candlestickSeriesRef.current?.removePriceLine(line)
+        })
+        priceLinesRef.current = []
 
+        // Render chart with candles
         updateChartWithBars(bars)
 
-        // Fetch S/R levels
-        const priceRangeParam = priceRangePct !== THRESHOLDS.srRange.default ? `?price_range_pct=${priceRangePct}` : ''
-        const srResponse = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.supportResistance}/${timeframe}${priceRangeParam}`)
-        if (srResponse.ok) {
-          const srData = await srResponse.json()
-          console.log('S/R Data received:', srData)
+        // Apply signals as markers IMMEDIATELY (not via useEffect)
+        if (candlestickSeriesRef.current && showOrderflowSignals && signals.length > 0) {
+          const markers = signals.map(signal => {
+            let shape: 'arrowUp' | 'arrowDown' | 'circle' | 'square' = 'circle'
+            let color = '#ffffff'
+            let text = ''
+            let position: 'belowBar' | 'aboveBar' = 'belowBar'
 
-          // Clear old price lines
-          priceLinesRef.current.forEach(line => {
-            candlestickSeriesRef.current?.removePriceLine(line)
+            if (signal.signal_type === 'Absorption') {
+              text = LABELS.signals.absorption.slice(0, 3)
+              shape = signal.direction === 'BULLISH' ? 'arrowUp' : 'arrowDown'
+              color = signal.direction === 'BULLISH' ? COLORS.signals.absorption : COLORS.bearish
+              position = signal.direction === 'BULLISH' ? 'belowBar' : 'aboveBar'
+            } else if (signal.signal_type === 'LSF') {
+              text = LABELS.signals.lsf
+              shape = signal.direction === 'BULLISH' ? 'arrowUp' : 'arrowDown'
+              color = signal.direction === 'BULLISH' ? COLORS.signals.lsf : COLORS.signals.lsfBearish
+              position = signal.direction === 'BULLISH' ? 'belowBar' : 'aboveBar'
+            } else if (signal.signal_type === 'OB Imb') {
+              text = LABELS.signals.obi
+              shape = 'square'
+              color = signal.direction === 'BULLISH' ? COLORS.bullishLight : COLORS.bearish
+              position = signal.direction === 'BULLISH' ? 'belowBar' : 'aboveBar'
+            } else if (signal.signal_type === 'Delta Unwind') {
+              text = 'DU'
+              shape = signal.direction === 'BULLISH' ? 'arrowUp' : 'arrowDown'
+              color = COLORS.signals.deltaUnwind
+              position = signal.direction === 'BULLISH' ? 'belowBar' : 'aboveBar'
+            } else if (signal.signal_type === 'Exhaustion') {
+              text = 'EXH'
+              shape = signal.direction === 'BULLISH' ? 'arrowUp' : 'arrowDown'
+              color = COLORS.signals.exhaustion
+              position = signal.direction === 'BULLISH' ? 'belowBar' : 'aboveBar'
+            }
+
+            return {
+              time: signal.timestamp as any,
+              position: position,
+              color: color,
+              shape: shape,
+              text: text,
+              size: CHART_CONFIG.markerSize,
+            }
           })
-          priceLinesRef.current = []
-
-          // Draw S/R levels as price lines
-          if (chartRef.current && candlestickSeriesRef.current) {
-            // Support levels (green)
-            console.log(`Drawing ${srData.support.length} support levels`)
-            srData.support.forEach((level: SRLevel) => {
-              const line = candlestickSeriesRef.current?.createPriceLine({
-                price: level.price,
-                color: COLORS.chart.support,
-                lineWidth: 1,
-                lineStyle: CHART_CONFIG.srLineStyle,
-                axisLabelVisible: true,
-                title: `S ${level.touches}`,
-              })
-              if (line) {
-                priceLinesRef.current.push(line)
-                console.log(`Drew support at ${level.price}`)
-              }
-            })
-
-            // Resistance levels (red)
-            console.log(`Drawing ${srData.resistance.length} resistance levels`)
-            srData.resistance.forEach((level: SRLevel) => {
-              const line = candlestickSeriesRef.current?.createPriceLine({
-                price: level.price,
-                color: COLORS.chart.resistance,
-                lineWidth: 1,
-                lineStyle: CHART_CONFIG.srLineStyle,
-                axisLabelVisible: true,
-                title: `R ${level.touches}`,
-              })
-              if (line) {
-                priceLinesRef.current.push(line)
-                console.log(`Drew resistance at ${level.price}`)
-              }
-            })
-
-            // Volume nodes (POC) - disabled until we have proper volume profile
-            // if (srData.volume_nodes) {
-            //   console.log(`Drawing ${srData.volume_nodes.length} volume nodes`)
-            //   srData.volume_nodes.forEach((level: SRLevel) => {
-            //     const line = candlestickSeriesRef.current?.createPriceLine({
-            //       price: level.price,
-            //       color: '#3b82f6',
-            //       lineWidth: 1,
-            //       lineStyle: 3, // Dotted
-            //       axisLabelVisible: true,
-            //       title: 'POC',
-            //     })
-            //     if (line) {
-            //       priceLinesRef.current.push(line)
-            //       console.log(`Drew volume node at ${level.price}`)
-            //     }
-            //   })
-            // }
-
-            console.log(`Total price lines drawn: ${priceLinesRef.current.length}`)
-          } else {
-            console.error('Chart or candlestick series not available')
-          }
-        } else {
-          console.error('Failed to fetch S/R levels:', srResponse.status)
+          markers.sort((a, b) => (a.time as number) - (b.time as number))
+          candlestickSeriesRef.current.setMarkers(markers as any)
         }
 
-        // Fetch orderflow signals
-        try {
-          const signalsResponse = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.orderflowSignals}/${timeframe}?limit=${CHART_CONFIG.signalsLimit}`)
-          if (signalsResponse.ok) {
-            const signalsData = await signalsResponse.json()
-            setOrderflowSignals(signalsData.signals || [])
-            console.log(`[Orderflow] Loaded ${signalsData.signals?.length || 0} signals`)
-          }
-        } catch (err) {
-          console.error('Error fetching orderflow signals:', err)
+        // Draw S/R levels as price lines
+        if (srData && chartRef.current && candlestickSeriesRef.current) {
+          console.log('S/R Data received:', srData)
+
+          srData.support.forEach((level: SRLevel) => {
+            const line = candlestickSeriesRef.current?.createPriceLine({
+              price: level.price,
+              color: COLORS.chart.support,
+              lineWidth: 1,
+              lineStyle: CHART_CONFIG.srLineStyle,
+              axisLabelVisible: true,
+              title: `S ${level.touches}`,
+            })
+            if (line) priceLinesRef.current.push(line)
+          })
+
+          srData.resistance.forEach((level: SRLevel) => {
+            const line = candlestickSeriesRef.current?.createPriceLine({
+              price: level.price,
+              color: COLORS.chart.resistance,
+              lineWidth: 1,
+              lineStyle: CHART_CONFIG.srLineStyle,
+              axisLabelVisible: true,
+              title: `R ${level.touches}`,
+            })
+            if (line) priceLinesRef.current.push(line)
+          })
+
+          console.log(`Total price lines drawn: ${priceLinesRef.current.length}`)
         }
 
         // Fit content to view on load

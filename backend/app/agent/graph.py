@@ -106,8 +106,8 @@ def observe_market(state: AgentState) -> AgentState:
                 timestamp,
                 open, high, low, close, volume,
                 dom_imbalance,
-                cvd as instant_delta
-            FROM order_book
+                instant_delta
+            FROM ohlcv_ticks
             WHERE symbol = '{symbol}' AND timeframe = '{timeframe}'
             ORDER BY timestamp DESC
             LIMIT 200

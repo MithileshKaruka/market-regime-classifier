@@ -1,0 +1,83 @@
+# Databento Streaming Configuration
+
+streaming:
+  # Dataset for CME futures
+  dataset: "GLBX.MDP3"
+
+  # Symbols to stream (parent symbols for continuous contracts)
+  symbols:
+    - "MNQ"  # Micro E-mini Nasdaq-100
+
+  # Schemas to subscribe
+  schemas:
+    - "mbp-1"   # Top-of-book quotes for DOM/spread
+    # - "trades"  # Reserved for future: footprint charts
+
+  # Symbol type for subscription
+  stype_in: "parent"  # Use parent symbols for continuous contracts
+
+  # Timeframes to aggregate
+  timeframes:
+    - "5M"
+    - "15M"
+    - "1H"
+    - "4H"
+    - "1D"
+
+  # Buffer settings
+  buffer:
+    # How often to flush to database (seconds)
+    flush_interval: 1.0
+
+    # Max records before forced flush
+    max_buffer_size: 10000
+
+  # DOM calculation
+  dom:
+    # Smoothing factor for DOM updates (0-1, higher = more smoothing)
+    smoothing_factor: 0.9
+
+# Data retention settings
+retention:
+  # Live database retention
+  live_db:
+    # OHLCV bars with orderflow
+    ohlcv_ticks_days: 1825  # 5 years
+
+    # Raw MBP ticks (until live feed stable, then remove)
+    mbp_ticks_days: 7
+
+  # DBN archive retention (for backtesting)
+  # Files are stored as .dbn.zst (zstd compressed)
+  archive:
+    mbp_days: 60     # 60 days of MBP-1 data
+    trades_days: 90  # 90 days of trades (future)
+
+# Weekly maintenance job
+maintenance:
+  # Schedule: Friday after CME close
+  schedule:
+    day: "friday"
+    time: "16:30"  # 4:30 PM CST
+    timezone: "America/Chicago"
+
+  # Tasks to run
+  tasks:
+    - cleanup_old_dbn
+    - cleanup_old_ohlcv
+    - vacuum_database
+
+# WebSocket settings
+websocket:
+  # Endpoint path
+  path: "/ws/live"
+
+  # Heartbeat interval (seconds)
+  heartbeat_interval: 30
+
+  # What to push to clients
+  push_events:
+    - bar_update      # New/updated bar
+    - bar_close       # Bar completed
+    - signal          # New signal detected
+    - regime_change   # Regime changed

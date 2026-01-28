@@ -53,7 +53,7 @@ async def get_chart_with_indicators(
         # Data is pre-filtered during load, so no need to filter here
         count_result = storage.conn.execute(f"""
             SELECT COUNT(*) as total
-            FROM order_book
+            FROM ohlcv_ticks
             WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
         """).fetchone()
         total_count = count_result[0] if count_result else 0
@@ -62,7 +62,7 @@ async def get_chart_with_indicators(
         # Data is already clean from load process (settlement artifacts removed)
         df_ohlcv = storage.conn.execute(f"""
             SELECT timestamp, open, high, low, close, volume
-            FROM order_book
+            FROM ohlcv_ticks
             WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
             ORDER BY timestamp DESC
             LIMIT {limit} OFFSET {offset}

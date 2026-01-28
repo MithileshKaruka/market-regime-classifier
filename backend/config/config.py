@@ -12,16 +12,18 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# Default config path - now in the same directory
+# Default config paths
 CONFIG_PATH = Path(__file__).parent / "agent_config.yaml"
+SECRETS_PATH = Path(__file__).parent / "secrets.yaml"
+DATABENTO_CONFIG_PATH = Path(__file__).parent / "databento_config.yaml"
 
 
 @dataclass
 class ScoringConfig:
     """Bias scoring weights"""
     trend_structure_weight: int = 20
-    market_intensity_weight: int = 30
-    orderflow_alpha_weight: int = 50
+    market_intensity_weight: int = 20
+    orderflow_alpha_weight: int = 60
 
 
 @dataclass
@@ -74,6 +76,51 @@ class StreamingConfig:
     default_timeframes: List[str] = field(default_factory=lambda: ["5M", "15M", "1H", "4H", "1D"])
     flush_interval_seconds: float = 1.0  # How often to flush to database
     dom_smoothing_factor: float = 0.9  # EMA factor for DOM updates
+    max_buffer_size: int = 10000  # Max records before forced flush
+    schemas: List[str] = field(default_factory=lambda: ["mbp-1"])  # Schemas to subscribe
+    stype_in: str = "parent"  # Symbol type for subscription
+
+
+@dataclass
+class DatabentoSecretsConfig:
+    """Databento API secrets (loaded from secrets.yaml)"""
+    api_key: str = ""
+    live_endpoint: str = "wss://live.databento.com"
+    historical_endpoint: str = "https://hist.databento.com"
+
+
+@dataclass
+class DatabasePathsConfig:
+    """Database path configuration"""
+    main_db: str = "data/market_data.duckdb"
+    archive_dir: str = "data/archive"
+
+
+@dataclass
+class RetentionConfig:
+    """Data retention settings"""
+    ohlcv_ticks_days: int = 1825  # 5 years
+    mbp_ticks_days: int = 7
+    archive_mbp_days: int = 60
+    archive_trades_days: int = 90
+
+
+@dataclass
+class MaintenanceScheduleConfig:
+    """Maintenance job schedule"""
+    day: str = "friday"
+    time: str = "16:30"
+    timezone: str = "America/Chicago"
+
+
+@dataclass
+class WebSocketConfig:
+    """WebSocket settings"""
+    path: str = "/ws/live"
+    heartbeat_interval: int = 30
+    push_events: List[str] = field(default_factory=lambda: [
+        "bar_update", "bar_close", "signal", "regime_change"
+    ])
 
 
 @dataclass
@@ -93,10 +140,10 @@ class MarketIntensityConfig:
 class OrderflowAlphaConfig:
     """Orderflow Alpha parameters"""
     # OBI (Order Book Imbalance) thresholds
-    # Backtested: 15M shows edge (55.7% hit rate, 1.57 PF at threshold 2.2)
-    obi_strong_imbalance: float = 2.5
-    obi_moderate_imbalance: float = 2.0
-    obi_threshold: float = 2.2  # Signal detection threshold (backtested optimal)
+    # For DOM-derived data: dom / (1-dom), threshold ~1.3 for DOM ~0.56
+    obi_strong_imbalance: float = 1.5
+    obi_moderate_imbalance: float = 1.3
+    obi_threshold: float = 1.3  # Signal detection threshold for DOM-derived data
     # LDR (Liquidity Depth Ratio)
     ldr_wall_threshold: float = 2.5
     # CVD (Cumulative Volume Delta)
@@ -116,26 +163,29 @@ class OrderflowAlphaConfig:
         '1D': {'volume_mult': 1.8, 'price_tol': 0.005, 'dom_threshold': 0.51, 'lookback': 20},
     })
     # Timeframe-specific OBI thresholds
-    # Only 15M currently shows predictive value
+    # Adjusted for DOM-derived imbalance (dom / (1-dom))
     obi_by_tf: Dict[str, Dict[str, float]] = field(default_factory=lambda: {
-        '1M': {'threshold': 2.5},
-        '5M': {'threshold': 2.2},
-        '15M': {'threshold': 2.2},  # Backtested: 55.7% hit rate, 1.57 PF
-        '1H': {'threshold': 2.0},
-        '4H': {'threshold': 2.0},
-        '1D': {'threshold': 2.0},
+        '1M': {'threshold': 1.4},
+        '5M': {'threshold': 1.3},
+        '15M': {'threshold': 1.3},
+        '1H': {'threshold': 1.25},
+        '4H': {'threshold': 1.25},
+        '1D': {'threshold': 1.2},
     })
     # LSF (Liquidity Sweep Fade) detection - PURE PRICE BASED
     lsf_sweep_threshold_pct: float = 0.001  # Min % beyond level for sweep
     lsf_snapback_pct: float = 0.002  # 0.2% snapback required
     lsf_snapback_bars: int = 3  # Max bars to wait for snapback
-    # Delta Unwind detection
-    delta_zscore_threshold: float = 2.0  # Z-score threshold for extreme
-    delta_unwind_pct: float = 0.1  # Min % of delta that must unwind
-    delta_unwind_bars: int = 3  # Bars to confirm unwind
-    # Exhaustion detection
-    exhaustion_volume_mult: float = 1.5  # Volume spike multiplier
-    exhaustion_range_ratio_max: float = 0.5  # Max range ratio for exhaustion
+    # Delta Unwind detection (backtested: 91.7% hit rate, 33.75 PF)
+    delta_zscore_threshold: float = 1.5  # Z-score threshold for extreme
+    delta_unwind_pct: float = 0.15  # Min % of delta that must unwind (15%)
+    delta_unwind_bars: int = 8  # Bars to confirm unwind
+    delta_lookback_bars: int = 100  # Lookback for z-score calculation
+    # Exhaustion detection (backtested: 63.6% hit rate, 1.51 PF)
+    exhaustion_volume_mult: float = 1.3  # Volume spike multiplier
+    exhaustion_range_ratio_max: float = 0.3  # Max range ratio for exhaustion
+    exhaustion_trend_lookback: int = 5  # Bars to determine trend
+    exhaustion_lookback_bars: int = 20  # Lookback for rolling averages
 
 
 @dataclass
@@ -360,3 +410,173 @@ def get_config() -> AgentConfig:
 def reload_config() -> AgentConfig:
     """Force reload configuration from file"""
     return load_config(force_reload=True)
+
+
+# Databento configuration singletons
+_secrets: Optional[DatabentoSecretsConfig] = None
+_db_paths: Optional[DatabasePathsConfig] = None
+_retention: Optional[RetentionConfig] = None
+_maintenance: Optional[MaintenanceScheduleConfig] = None
+_websocket: Optional[WebSocketConfig] = None
+
+
+def load_secrets(force_reload: bool = False) -> DatabentoSecretsConfig:
+    """Load secrets from secrets.yaml
+
+    Args:
+        force_reload: If True, reload even if cached
+
+    Returns:
+        DatabentoSecretsConfig with API credentials
+    """
+    global _secrets
+
+    if _secrets is not None and not force_reload:
+        return _secrets
+
+    # Try environment variable first
+    import os
+    api_key = os.getenv("DATABENTO_API_KEY", "")
+
+    if not SECRETS_PATH.exists():
+        logger.warning(f"Secrets file not found at {SECRETS_PATH}")
+        _secrets = DatabentoSecretsConfig(api_key=api_key)
+        return _secrets
+
+    try:
+        with open(SECRETS_PATH, 'r') as f:
+            raw = yaml.safe_load(f)
+
+        databento = raw.get('databento', {})
+        _secrets = DatabentoSecretsConfig(
+            api_key=api_key or databento.get('api_key', ''),
+            live_endpoint=databento.get('live_endpoint', 'wss://live.databento.com'),
+            historical_endpoint=databento.get('historical_endpoint', 'https://hist.databento.com'),
+        )
+
+        if _secrets.api_key:
+            logger.info("Databento API key loaded")
+        else:
+            logger.warning("Databento API key not configured")
+
+        return _secrets
+
+    except Exception as e:
+        logger.error(f"Error loading secrets: {e}")
+        _secrets = DatabentoSecretsConfig(api_key=api_key)
+        return _secrets
+
+
+def load_databento_config(force_reload: bool = False) -> dict:
+    """Load Databento streaming configuration
+
+    Returns:
+        Dict with all databento config sections
+    """
+    global _db_paths, _retention, _maintenance, _websocket
+
+    if not force_reload and all([_db_paths, _retention, _maintenance, _websocket]):
+        return {
+            'database': _db_paths,
+            'retention': _retention,
+            'maintenance': _maintenance,
+            'websocket': _websocket,
+        }
+
+    if not DATABENTO_CONFIG_PATH.exists():
+        logger.warning(f"Databento config not found at {DATABENTO_CONFIG_PATH}, using defaults")
+        _db_paths = DatabasePathsConfig()
+        _retention = RetentionConfig()
+        _maintenance = MaintenanceScheduleConfig()
+        _websocket = WebSocketConfig()
+    else:
+        try:
+            with open(DATABENTO_CONFIG_PATH, 'r') as f:
+                raw = yaml.safe_load(f)
+
+            # Load database paths from secrets.yaml
+            if SECRETS_PATH.exists():
+                with open(SECRETS_PATH, 'r') as f:
+                    secrets_raw = yaml.safe_load(f)
+                db_config = secrets_raw.get('database', {})
+            else:
+                db_config = {}
+
+            _db_paths = DatabasePathsConfig(
+                main_db=db_config.get('main_db', 'data/market_data.duckdb'),
+                archive_dir=db_config.get('archive_dir', 'data/archive'),
+            )
+
+            retention = raw.get('retention', {})
+            live_db = retention.get('live_db', {})
+            archive = retention.get('archive', {})
+            _retention = RetentionConfig(
+                ohlcv_ticks_days=live_db.get('ohlcv_ticks_days', 1825),
+                mbp_ticks_days=live_db.get('mbp_ticks_days', 7),
+                archive_mbp_days=archive.get('mbp_days', 60),
+                archive_trades_days=archive.get('trades_days', 90),
+            )
+
+            maint = raw.get('maintenance', {}).get('schedule', {})
+            _maintenance = MaintenanceScheduleConfig(
+                day=maint.get('day', 'friday'),
+                time=maint.get('time', '16:30'),
+                timezone=maint.get('timezone', 'America/Chicago'),
+            )
+
+            ws = raw.get('websocket', {})
+            _websocket = WebSocketConfig(
+                path=ws.get('path', '/ws/live'),
+                heartbeat_interval=ws.get('heartbeat_interval', 30),
+                push_events=ws.get('push_events', ['bar_update', 'bar_close', 'signal', 'regime_change']),
+            )
+
+            logger.info("Databento config loaded")
+
+        except Exception as e:
+            logger.error(f"Error loading databento config: {e}")
+            _db_paths = DatabasePathsConfig()
+            _retention = RetentionConfig()
+            _maintenance = MaintenanceScheduleConfig()
+            _websocket = WebSocketConfig()
+
+    return {
+        'database': _db_paths,
+        'retention': _retention,
+        'maintenance': _maintenance,
+        'websocket': _websocket,
+    }
+
+
+def get_secrets() -> DatabentoSecretsConfig:
+    """Get Databento secrets (loads if not cached)"""
+    return load_secrets()
+
+
+def get_databento_config() -> dict:
+    """Get Databento configuration (loads if not cached)"""
+    return load_databento_config()
+
+
+def get_database_paths() -> DatabasePathsConfig:
+    """Get database paths configuration"""
+    load_databento_config()
+    return _db_paths
+
+
+def get_retention_config() -> RetentionConfig:
+    """Get retention configuration"""
+    load_databento_config()
+    return _retention
+
+
+def get_maintenance_config() -> MaintenanceScheduleConfig:
+    """Get maintenance schedule configuration"""
+    load_databento_config()
+    return _maintenance
+
+
+def get_websocket_config() -> WebSocketConfig:
+    """Get WebSocket configuration"""
+    load_databento_config()
+    return _websocket

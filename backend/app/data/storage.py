@@ -32,12 +32,9 @@ class DuckDBStorage:
 
     def _initialize_tables(self):
         """Create necessary tables"""
-        # OHLCV data with order flow metrics
-        # Note: MBP-10 fields removed (bid/ask prices/sizes, spread, etc.)
-        # DOM imbalance will come from real-time MBP-10 only
-        # CVD will be calculated from trades data
+        # Primary OHLCV table with orderflow metrics (consolidated from order_book + mbp aggregation)
         self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS order_book (
+            CREATE TABLE IF NOT EXISTS ohlcv_ticks (
                 timestamp TIMESTAMP,
                 symbol VARCHAR,
                 timeframe VARCHAR,
@@ -46,10 +43,12 @@ class DuckDBStorage:
                 low DOUBLE,
                 close DOUBLE,
                 volume BIGINT,
+                instant_delta BIGINT,
                 dom_imbalance DOUBLE,
-                cvd DOUBLE,
-                vwap DOUBLE,
-                PRIMARY KEY (timestamp, symbol, timeframe)
+                total_bid_depth DOUBLE,
+                total_ask_depth DOUBLE,
+                cvd BIGINT,
+                PRIMARY KEY (symbol, timeframe, timestamp)
             )
         """)
 
@@ -107,26 +106,26 @@ class DuckDBStorage:
 
         # logger.info("Tables initialized successfully")
 
-    def insert_order_book_data(
+    def insert_ohlcv_ticks(
         self,
         df: pl.DataFrame,
         symbol: str = "MNQ",
         timeframe: str = "1M"
     ):
-        """Insert order book data into database
+        """Insert OHLCV data with orderflow metrics into database
 
         Args:
-            df: Polars DataFrame with order book data
+            df: Polars DataFrame with OHLCV + orderflow data
             symbol: Trading symbol
             timeframe: Data timeframe
         """
-        logger.info(f"Inserting {len(df)} order book records")
+        logger.info(f"Inserting {len(df)} ohlcv_ticks records")
 
         # Determine timestamp column name
         ts_col = "ts_event" if "ts_event" in df.columns else "timestamp"
 
-        # Select and rename columns to match table schema
-        df_insert = df.select([
+        # Build column list with defaults for missing columns
+        columns = [
             pl.col(ts_col).alias("timestamp"),
             pl.lit(symbol).alias("symbol"),
             pl.lit(timeframe).alias("timeframe"),
@@ -135,19 +134,49 @@ class DuckDBStorage:
             pl.col("low"),
             pl.col("close"),
             pl.col("volume"),
-            pl.col("dom_imbalance"),
-            pl.col("cvd"),
-            pl.col("vwap"),
-        ])
+        ]
+
+        # Add orderflow columns with defaults if missing
+        if "instant_delta" in df.columns:
+            columns.append(pl.col("instant_delta"))
+        else:
+            columns.append(pl.lit(None).cast(pl.Int64).alias("instant_delta"))
+
+        if "dom_imbalance" in df.columns:
+            columns.append(pl.col("dom_imbalance"))
+        else:
+            columns.append(pl.lit(None).cast(pl.Float64).alias("dom_imbalance"))
+
+        if "total_bid_depth" in df.columns:
+            columns.append(pl.col("total_bid_depth"))
+        else:
+            columns.append(pl.lit(None).cast(pl.Float64).alias("total_bid_depth"))
+
+        if "total_ask_depth" in df.columns:
+            columns.append(pl.col("total_ask_depth"))
+        else:
+            columns.append(pl.lit(None).cast(pl.Float64).alias("total_ask_depth"))
+
+        if "cvd" in df.columns:
+            columns.append(pl.col("cvd"))
+        else:
+            columns.append(pl.lit(None).cast(pl.Int64).alias("cvd"))
+
+        df_insert = df.select(columns)
 
         # Insert into DuckDB
         self.conn.execute("""
-            INSERT OR REPLACE INTO order_book
+            INSERT OR REPLACE INTO ohlcv_ticks
             SELECT * FROM df_insert
         """)
 
         self.conn.commit()
-        logger.info("Order book data inserted successfully")
+        logger.info("OHLCV ticks data inserted successfully")
+
+    # Backwards compatibility alias
+    def insert_order_book_data(self, df: pl.DataFrame, symbol: str = "MNQ", timeframe: str = "1M"):
+        """Deprecated: Use insert_ohlcv_ticks instead"""
+        return self.insert_ohlcv_ticks(df, symbol, timeframe)
 
     def insert_regime_data(
         self,
@@ -307,7 +336,7 @@ class DuckDBStorage:
         """
         query = f"""
             SELECT *
-            FROM order_book
+            FROM ohlcv_ticks
             WHERE symbol = '{symbol}'
                 AND timeframe = '{timeframe}'
             ORDER BY timestamp DESC

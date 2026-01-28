@@ -2,10 +2,38 @@
 
 Combines multiple signal categories into a unified 0-100 bias score.
 
+Calculation Order (ORDER FLOW FIRST):
+  1. Order Flow Alpha (60%) - calculated FIRST to derive direction
+  2. Trend & Structure (20%) - adjusted based on orderflow alignment
+  3. Market Intensity (20%) - amplified/dampened based on orderflow agreement
+
 Categories:
 1. Trend & Structure (20%): EMA trend + market structure + S/R levels
-2. Market Intensity (30%): RVOL + VPIN - measures conviction behind moves
-3. Order Flow Alpha (50%): OBI + LSF + Absorption + LDR - what big money is doing
+2. Market Intensity (20%): RVOL + VPIN - measures conviction behind moves
+3. Order Flow Alpha (60%): Context-aware scoring based on active primary signals
+
+Order Flow Alpha - Context-Aware Scoring:
+  When PRIMARY SIGNAL is active (Absorption/Exhaustion/Delta Unwind):
+    - Primary Signal: 50%
+    - LDR: 20%
+    - OBI: 15%
+    - CVD: 15%
+
+  When NO PRIMARY SIGNAL is active (BASE mode):
+    - LDR: 33%
+    - OBI: 33%
+    - CVD: 34%
+
+Component Alignment:
+  Order Flow direction (derived from score: >55=BULLISH, <45=BEARISH) affects other components:
+
+  Market Intensity Alignment:
+    - If price direction AGREES with orderflow → +20% amplification (push away from 50)
+    - If price direction CONFLICTS with orderflow → -20% dampening (pull toward 50)
+
+  Trend & Structure Confidence:
+    - If trend CONFIRMS orderflow → +15% boost
+    - If trend CONTRADICTS orderflow → -15% reduction
 
 Score Interpretation:
 - 0-30: High Bearish Conviction - Short entries only, ignore support bounces
@@ -66,7 +94,7 @@ class TrendStructureScore:
 
 @dataclass
 class MarketIntensityScore:
-    """Market Intensity component (30% weight)"""
+    """Market Intensity component (20% weight)"""
     score: float  # 0-100
     rvol: float
     rvol_contribution: float  # 0-50
@@ -78,22 +106,33 @@ class MarketIntensityScore:
 
 @dataclass
 class OrderFlowAlphaScore:
-    """Order Flow Alpha component (50% weight)
+    """Order Flow Alpha component (60% weight)
 
-    Components (20% each of this category):
-    - OBI: Order Book Imbalance
-    - LDR: Liquidity Depth Ratio
-    - Absorption: Absorption signals
-    - LSF: Liquidity Sweep Fade signals
-    - CVD: Cumulative Volume Delta from trades (true buying/selling pressure)
+    Context-aware scoring based on active primary signals:
+
+    When PRIMARY SIGNAL is active (Absorption/Exhaustion/Delta Unwind):
+    - Primary Signal: 50%
+    - LDR: 20%
+    - OBI: 15%
+    - CVD: 15%
+
+    When NO PRIMARY SIGNAL is active:
+    - LDR: 33%
+    - OBI: 33%
+    - CVD: 33%
+
+    Primary signals ranked by conviction (based on backtesting):
+    1. Delta Unwind: 86.7% hit rate on 5M
+    2. Exhaustion: 81.8% hit rate on 5M
+    3. Absorption: 66.7% hit rate on 15M
     """
     score: float  # 0-100
-    obi_score: float  # 0-20
-    ldr_score: float  # 0-20
-    absorption_score: float  # 0-20
-    lsf_score: float  # 0-20
-    cvd_score: float  # 0-20 (from trades data)
-    active_signals: List[str]
+    active_mode: str  # "ABSORPTION", "EXHAUSTION", "DELTA_UNWIND", or "BASE"
+    primary_score: float  # Primary signal score contribution
+    ldr_score: float  # LDR contribution
+    obi_score: float  # OBI contribution
+    cvd_score: float  # CVD contribution
+    active_signals: List[str]  # All active signals in strength order
     details: str
 
 
@@ -150,6 +189,7 @@ class AgentBiasCalculator:
         self,
         df: pl.DataFrame,
         sr_levels: Optional[List[Dict]] = None,
+        orderflow_direction: Optional[str] = None,  # "BULLISH", "BEARISH", or "NEUTRAL"
     ) -> TrendStructureScore:
         """Calculate Trend & Structure score (20% of total)
 
@@ -157,6 +197,10 @@ class AgentBiasCalculator:
         - EMA 12/25 trend direction (40% of this category)
         - Market structure - HH/HL vs LH/LL (40% of this category)
         - Price position vs S/R levels (20% of this category)
+
+        Confidence Modifier (based on orderflow alignment):
+        - If orderflow confirms trend direction → boost score by 10%
+        - If orderflow contradicts trend direction → reduce score by 10%
         """
         if len(df) < self.structure_lookback:
             return TrendStructureScore(
@@ -267,7 +311,30 @@ class AgentBiasCalculator:
         # Combine scores (40% EMA + 40% Structure + 20% S/R)
         total_score = (ema_score * 0.40) + (structure_score * 0.40) + (sr_score * 0.20)
 
-        details = f"EMA {ema_trend.value} ({ema_score:.0f}) | Structure {market_structure.value} ({structure_score:.0f}) | S/R {price_vs_sr} ({sr_score:.0f})"
+        # Apply orderflow confidence modifier
+        # Determine trend direction from score (>55 = bullish, <45 = bearish)
+        trend_direction = "BULLISH" if total_score > 55 else "BEARISH" if total_score < 45 else "NEUTRAL"
+        alignment_modifier = ""
+
+        if orderflow_direction and orderflow_direction != "NEUTRAL" and trend_direction != "NEUTRAL":
+            if orderflow_direction == trend_direction:
+                # Orderflow confirms trend - boost score by amplifying distance from 50
+                boost = abs(total_score - 50) * 0.15  # 15% boost
+                if total_score > 50:
+                    total_score = min(100, total_score + boost)
+                else:
+                    total_score = max(0, total_score - boost)
+                alignment_modifier = " [OF+]"
+            else:
+                # Orderflow contradicts trend - dampen by pulling toward 50
+                dampen = abs(total_score - 50) * 0.15  # 15% dampen
+                if total_score > 50:
+                    total_score = total_score - dampen
+                else:
+                    total_score = total_score + dampen
+                alignment_modifier = " [OF-]"
+
+        details = f"EMA {ema_trend.value} ({ema_score:.0f}) | Structure {market_structure.value} ({structure_score:.0f}) | S/R {price_vs_sr} ({sr_score:.0f}){alignment_modifier}"
 
         return TrendStructureScore(
             score=round(total_score, 1),
@@ -282,8 +349,9 @@ class AgentBiasCalculator:
         rvol: Optional[float],
         vpin: Optional[float],
         price_direction: str,  # "UP" or "DOWN" from recent price action
+        orderflow_direction: Optional[str] = None,  # "BULLISH", "BEARISH", or "NEUTRAL"
     ) -> MarketIntensityScore:
-        """Calculate Market Intensity score (30% of total)
+        """Calculate Market Intensity score (20% of total)
 
         Components:
         - RVOL contribution (50% of this category)
@@ -292,6 +360,10 @@ class AgentBiasCalculator:
         Logic:
         - High RVOL + price direction = conviction in that direction
         - High VPIN = informed trading happening (amplifies direction)
+
+        Alignment Modifier:
+        - If price and orderflow directions AGREE → amplify score (push away from 50)
+        - If price and orderflow directions CONFLICT → dampen score (push toward 50)
         """
         rvol_score = 50.0
         vpin_score = 50.0
@@ -353,7 +425,33 @@ class AgentBiasCalculator:
         is_high_conviction = (rvol is not None and rvol >= self.rvol_high_threshold) and \
                             (vpin is not None and vpin >= 0.5)
 
-        details = f"RVOL {rvol:.2f}x ({rvol_score:.0f}) | VPIN {vpin:.1%} ({vpin_score:.0f})"
+        # Apply alignment modifier based on price vs orderflow agreement
+        alignment_modifier = ""
+        price_dir_normalized = "BULLISH" if price_direction == "UP" else "BEARISH" if price_direction == "DOWN" else "NEUTRAL"
+
+        if orderflow_direction and orderflow_direction != "NEUTRAL" and price_dir_normalized != "NEUTRAL":
+            if orderflow_direction == price_dir_normalized:
+                # Price and orderflow AGREE - amplify the score
+                # Push further from 50 by 20%
+                amplify = abs(total_score - 50) * 0.20
+                if total_score > 50:
+                    total_score = min(100, total_score + amplify)
+                else:
+                    total_score = max(0, total_score - amplify)
+                alignment_modifier = " [ALIGNED]"
+                is_high_conviction = is_high_conviction or (rvol is not None and rvol >= 1.0)
+            else:
+                # Price and orderflow CONFLICT - dampen the score
+                # Pull toward 50 by 20%
+                dampen = abs(total_score - 50) * 0.20
+                if total_score > 50:
+                    total_score = total_score - dampen
+                else:
+                    total_score = total_score + dampen
+                alignment_modifier = " [CONFLICT]"
+                is_high_conviction = False  # Can't be high conviction if signals conflict
+
+        details = f"RVOL {rvol:.2f}x ({rvol_score:.0f}) | VPIN {vpin:.1%} ({vpin_score:.0f}){alignment_modifier}"
 
         return MarketIntensityScore(
             score=round(total_score, 1),
@@ -370,135 +468,234 @@ class AgentBiasCalculator:
         obi_ratio: Optional[float],  # Bid/Ask ratio
         ldr: Optional[float],        # Liquidity Depth Ratio
         absorption_signals: List[Dict],  # Recent absorption signals
-        lsf_signals: List[Dict],         # Recent LSF signals
         cvd: Optional[float] = None,     # Cumulative Volume Delta from trades
+        delta_unwind_signals: Optional[List[Dict]] = None,  # Delta unwind signals
+        exhaustion_signals: Optional[List[Dict]] = None,    # Exhaustion signals
     ) -> OrderFlowAlphaScore:
-        """Calculate Order Flow Alpha score (50% of total)
+        """Calculate Order Flow Alpha score (60% of total)
 
-        Components (20 points each, 5 components = 100%):
-        - OBI: Order Book Imbalance direction
-        - LDR: Liquidity Depth Ratio (wall detection)
-        - Absorption: Recent absorption signals
-        - LSF: Recent liquidity sweep fade signals
-        - CVD: Cumulative Volume Delta (true buying/selling pressure from trades)
+        Context-aware scoring based on active primary signals:
+
+        When PRIMARY SIGNAL is active (Absorption/Exhaustion/Delta Unwind):
+        - Primary Signal: 50%
+        - LDR: 20%
+        - OBI: 15%
+        - CVD: 15%
+
+        When NO PRIMARY SIGNAL is active:
+        - LDR: 33%
+        - OBI: 33%
+        - CVD: 33%
+
+        Primary signals ranked by conviction:
+        1. Delta Unwind: 86.7% hit rate
+        2. Exhaustion: 81.8% hit rate
+        3. Absorption: 66.7% hit rate
         """
-        # OBI Score (0-100 -> 0-20 contribution)
-        obi_score = 50.0
+        # Weights when primary signal is active
+        PRIMARY_WEIGHT = 0.50
+        LDR_WEIGHT_WITH_PRIMARY = 0.20
+        OBI_WEIGHT_WITH_PRIMARY = 0.15
+        CVD_WEIGHT_WITH_PRIMARY = 0.15
+
+        # Weights when no primary signal (base mode)
+        LDR_WEIGHT_BASE = 0.33
+        OBI_WEIGHT_BASE = 0.33
+        CVD_WEIGHT_BASE = 0.34  # Slightly higher to sum to 1.0
+
+        # ============================================
+        # Calculate base scores for supporting signals
+        # ============================================
+
+        # OBI Score (0-100)
+        obi_raw = 50.0
         if obi_ratio is not None:
             if obi_ratio >= self.ldr_wall_threshold:
-                obi_score = 90  # Strong bid imbalance
+                obi_raw = 90  # Strong bid imbalance
             elif obi_ratio >= 1.5:
-                obi_score = 70
+                obi_raw = 70
             elif obi_ratio >= 1.1:
-                obi_score = 55
+                obi_raw = 55
             elif obi_ratio <= 1 / self.ldr_wall_threshold:
-                obi_score = 10  # Strong ask imbalance
+                obi_raw = 10  # Strong ask imbalance
             elif obi_ratio <= 0.67:
-                obi_score = 30
+                obi_raw = 30
             elif obi_ratio <= 0.9:
-                obi_score = 45
+                obi_raw = 45
             else:
-                obi_score = 50
+                obi_raw = 50
 
-        # LDR Score (0-100 -> 0-20 contribution)
-        ldr_score = 50.0
+        # LDR Score (0-100)
+        ldr_raw = 50.0
         if ldr is not None:
             if ldr >= self.ldr_wall_threshold:
-                ldr_score = 95  # Support wall - very bullish
+                ldr_raw = 95  # Support wall - very bullish
             elif ldr >= 2.0:
-                ldr_score = 80
+                ldr_raw = 80
             elif ldr >= 1.3:
-                ldr_score = 60
+                ldr_raw = 60
             elif ldr <= 1 / self.ldr_wall_threshold:
-                ldr_score = 5  # Resistance wall - very bearish
+                ldr_raw = 5  # Resistance wall - very bearish
             elif ldr <= 0.5:
-                ldr_score = 20
+                ldr_raw = 20
             elif ldr <= 0.77:
-                ldr_score = 40
+                ldr_raw = 40
             else:
-                ldr_score = 50
+                ldr_raw = 50
 
-        # Absorption Score (0-100 -> 0-20 contribution)
-        absorption_score = 50.0
+        # CVD Score (0-100)
+        cvd_raw = 50.0
+        cvd_threshold = self.cvd_threshold
+        if cvd is not None and cvd != 0:
+            if cvd >= cvd_threshold * 2:
+                cvd_raw = 90 + min(10, (cvd - cvd_threshold * 2) / cvd_threshold * 10)
+            elif cvd >= cvd_threshold:
+                cvd_raw = 60 + (cvd - cvd_threshold) / cvd_threshold * 30
+            elif cvd > 0:
+                cvd_raw = 50 + cvd / cvd_threshold * 10
+            elif cvd <= -cvd_threshold * 2:
+                cvd_raw = 10 - min(10, (abs(cvd) - cvd_threshold * 2) / cvd_threshold * 10)
+            elif cvd <= -cvd_threshold:
+                cvd_raw = 40 - (abs(cvd) - cvd_threshold) / cvd_threshold * 30
+            else:
+                cvd_raw = 50 - abs(cvd) / cvd_threshold * 10
+            cvd_raw = max(0, min(100, cvd_raw))
+
+        # ============================================
+        # Calculate primary signal scores
+        # ============================================
+
+        # Absorption Score (0-100)
+        absorption_raw = 50.0
+        absorption_active = False
         if absorption_signals:
             bullish_abs = sum(1 for s in absorption_signals if s.get("direction") == "BULLISH")
             bearish_abs = sum(1 for s in absorption_signals if s.get("direction") == "BEARISH")
             total_abs = bullish_abs + bearish_abs
 
             if total_abs > 0:
-                # Weight by recency (more recent = higher weight)
                 net_ratio = (bullish_abs - bearish_abs) / total_abs
-                absorption_score = 50 + (net_ratio * 40)  # 10-90 range
+                absorption_raw = 50 + (net_ratio * 40)  # 10-90 range
+                absorption_active = True
 
-        # LSF Score (0-100 -> 0-20 contribution)
-        lsf_score = 50.0
-        if lsf_signals:
-            # LSF signals are reversal signals - very high conviction
-            bullish_lsf = sum(1 for s in lsf_signals if s.get("direction") == "BULLISH")
-            bearish_lsf = sum(1 for s in lsf_signals if s.get("direction") == "BEARISH")
+        # Delta Unwind Score (0-100) - HIGHEST conviction
+        delta_unwind_raw = 50.0
+        delta_unwind_active = False
+        if delta_unwind_signals:
+            bullish_du = sum(1 for s in delta_unwind_signals if s.get("direction") == "BULLISH")
+            bearish_du = sum(1 for s in delta_unwind_signals if s.get("direction") == "BEARISH")
 
-            if bullish_lsf > bearish_lsf:
-                lsf_score = 75 + min(25, bullish_lsf * 10)  # 75-100
-            elif bearish_lsf > bullish_lsf:
-                lsf_score = 25 - min(25, bearish_lsf * 10)  # 0-25
-            else:
-                lsf_score = 50
+            if bullish_du > bearish_du:
+                delta_unwind_raw = 80 + min(20, bullish_du * 15)  # 80-100
+                delta_unwind_active = True
+            elif bearish_du > bullish_du:
+                delta_unwind_raw = 20 - min(20, bearish_du * 15)  # 0-20
+                delta_unwind_active = True
 
-        # CVD Score (0-100 -> 0-20 contribution)
-        # CVD from trades shows true buying/selling pressure
-        # Positive CVD = net buying (bullish), Negative CVD = net selling (bearish)
-        cvd_score = 50.0
-        cvd_threshold = self.cvd_threshold  # From config
-        if cvd is not None and cvd != 0:
-            # Normalize CVD to a 0-100 score
-            # Strong positive CVD (>2x threshold) = 90-100
-            # Moderate positive CVD (>threshold) = 60-90
-            # Weak positive CVD = 50-60
-            # Weak negative CVD = 40-50
-            # Moderate negative CVD (<-threshold) = 10-40
-            # Strong negative CVD (<-2x threshold) = 0-10
-            if cvd >= cvd_threshold * 2:
-                cvd_score = 90 + min(10, (cvd - cvd_threshold * 2) / cvd_threshold * 10)
-            elif cvd >= cvd_threshold:
-                cvd_score = 60 + (cvd - cvd_threshold) / cvd_threshold * 30
-            elif cvd > 0:
-                cvd_score = 50 + cvd / cvd_threshold * 10
-            elif cvd <= -cvd_threshold * 2:
-                cvd_score = 10 - min(10, (abs(cvd) - cvd_threshold * 2) / cvd_threshold * 10)
-            elif cvd <= -cvd_threshold:
-                cvd_score = 40 - (abs(cvd) - cvd_threshold) / cvd_threshold * 30
-            else:  # cvd < 0
-                cvd_score = 50 - abs(cvd) / cvd_threshold * 10
+        # Exhaustion Score (0-100) - HIGH conviction
+        exhaustion_raw = 50.0
+        exhaustion_active = False
+        if exhaustion_signals:
+            bullish_exh = sum(1 for s in exhaustion_signals if s.get("direction") == "BULLISH")
+            bearish_exh = sum(1 for s in exhaustion_signals if s.get("direction") == "BEARISH")
 
-            # Clamp to 0-100
-            cvd_score = max(0, min(100, cvd_score))
+            if bullish_exh > bearish_exh:
+                exhaustion_raw = 75 + min(25, bullish_exh * 12)  # 75-100
+                exhaustion_active = True
+            elif bearish_exh > bullish_exh:
+                exhaustion_raw = 25 - min(25, bearish_exh * 12)  # 0-25
+                exhaustion_active = True
 
-        # Combine scores (20% each - 5 components)
-        total_score = (obi_score * 0.20) + (ldr_score * 0.20) + \
-                     (absorption_score * 0.20) + (lsf_score * 0.20) + (cvd_score * 0.20)
+        # ============================================
+        # Determine active mode and calculate score
+        # ============================================
+
+        # Collect active primary signals with their scores and conviction rank
+        # Rank: 1=Delta Unwind (86.7%), 2=Exhaustion (81.8%), 3=Absorption (66.7%)
+        primary_signals = []
+        if delta_unwind_active:
+            primary_signals.append(("DELTA_UNWIND", delta_unwind_raw, 1, abs(delta_unwind_raw - 50)))
+        if exhaustion_active:
+            primary_signals.append(("EXHAUSTION", exhaustion_raw, 2, abs(exhaustion_raw - 50)))
+        if absorption_active:
+            primary_signals.append(("ABSORPTION", absorption_raw, 3, abs(absorption_raw - 50)))
+
+        # Sort by strength (distance from neutral), then by conviction rank
+        primary_signals.sort(key=lambda x: (-x[3], x[2]))
+
+        if primary_signals:
+            # Use strongest primary signal
+            active_mode, primary_raw, _, _ = primary_signals[0]
+
+            # Calculate score with primary signal weights
+            total_score = (
+                primary_raw * PRIMARY_WEIGHT +
+                ldr_raw * LDR_WEIGHT_WITH_PRIMARY +
+                obi_raw * OBI_WEIGHT_WITH_PRIMARY +
+                cvd_raw * CVD_WEIGHT_WITH_PRIMARY
+            )
+
+            primary_contribution = primary_raw * PRIMARY_WEIGHT
+            ldr_contribution = ldr_raw * LDR_WEIGHT_WITH_PRIMARY
+            obi_contribution = obi_raw * OBI_WEIGHT_WITH_PRIMARY
+            cvd_contribution = cvd_raw * CVD_WEIGHT_WITH_PRIMARY
+        else:
+            # Base mode - no primary signal active
+            active_mode = "BASE"
+
+            total_score = (
+                ldr_raw * LDR_WEIGHT_BASE +
+                obi_raw * OBI_WEIGHT_BASE +
+                cvd_raw * CVD_WEIGHT_BASE
+            )
+
+            primary_contribution = 0.0
+            ldr_contribution = ldr_raw * LDR_WEIGHT_BASE
+            obi_contribution = obi_raw * OBI_WEIGHT_BASE
+            cvd_contribution = cvd_raw * CVD_WEIGHT_BASE
+
+        # ============================================
+        # Build active signals list (strength order)
+        # ============================================
 
         active_signals = []
-        if obi_ratio and (obi_ratio > 1.3 or obi_ratio < 0.77):
-            active_signals.append("OBI")
-        if ldr and (ldr > 1.5 or ldr < 0.67):
-            active_signals.append("LDR")
-        if absorption_signals:
-            active_signals.append(f"ABS({len(absorption_signals)})")
-        if lsf_signals:
-            active_signals.append(f"LSF({len(lsf_signals)})")
-        if cvd is not None and abs(cvd) >= cvd_threshold:
-            cvd_dir = "+" if cvd > 0 else ""
-            active_signals.append(f"CVD({cvd_dir}{int(cvd/1000)}k)")
 
-        details = f"OBI {obi_score:.0f} | LDR {ldr_score:.0f} | Abs {absorption_score:.0f} | LSF {lsf_score:.0f} | CVD {cvd_score:.0f}"
+        # Add primary signals in strength order
+        for sig_name, sig_score, _, _ in primary_signals:
+            direction = "+" if sig_score > 50 else "-"
+            if sig_name == "DELTA_UNWIND":
+                active_signals.append(f"DU{direction}")
+            elif sig_name == "EXHAUSTION":
+                active_signals.append(f"EXH{direction}")
+            elif sig_name == "ABSORPTION":
+                active_signals.append(f"ABS{direction}")
+
+        # Add supporting signals if significant
+        if ldr is not None and (ldr > 1.5 or ldr < 0.67):
+            direction = "+" if ldr_raw > 50 else "-"
+            active_signals.append(f"LDR{direction}")
+        if obi_ratio is not None and (obi_ratio > 1.3 or obi_ratio < 0.77):
+            direction = "+" if obi_raw > 50 else "-"
+            active_signals.append(f"OBI{direction}")
+        if cvd is not None and abs(cvd) >= cvd_threshold:
+            direction = "+" if cvd > 0 else "-"
+            active_signals.append(f"CVD{direction}")
+
+        # Build details string
+        mode_label = active_mode.replace("_", " ")
+        if active_mode == "BASE":
+            details = f"Mode: {mode_label} | LDR {ldr_raw:.0f} | OBI {obi_raw:.0f} | CVD {cvd_raw:.0f}"
+        else:
+            primary_label = {"DELTA_UNWIND": "DU", "EXHAUSTION": "EXH", "ABSORPTION": "ABS"}[active_mode]
+            details = f"Mode: {mode_label} | {primary_label} {primary_raw:.0f} | LDR {ldr_raw:.0f} | OBI {obi_raw:.0f} | CVD {cvd_raw:.0f}"
 
         return OrderFlowAlphaScore(
             score=round(total_score, 1),
-            obi_score=round(obi_score * 0.20, 1),
-            ldr_score=round(ldr_score * 0.20, 1),
-            absorption_score=round(absorption_score * 0.20, 1),
-            lsf_score=round(lsf_score * 0.20, 1),
-            cvd_score=round(cvd_score * 0.20, 1),
+            active_mode=active_mode,
+            primary_score=round(primary_contribution, 1),
+            ldr_score=round(ldr_contribution, 1),
+            obi_score=round(obi_contribution, 1),
+            cvd_score=round(cvd_contribution, 1),
             active_signals=active_signals,
             details=details,
         )
@@ -512,15 +709,20 @@ class AgentBiasCalculator:
         obi_ratio: Optional[float] = None,
         ldr: Optional[float] = None,
         absorption_signals: Optional[List[Dict]] = None,
-        lsf_signals: Optional[List[Dict]] = None,
         cvd: Optional[float] = None,
+        delta_unwind_signals: Optional[List[Dict]] = None,
+        exhaustion_signals: Optional[List[Dict]] = None,
     ) -> AgentBiasResult:
         """Calculate total agent bias score (0-100)
 
-        Combines:
-        - Trend & Structure: 20%
-        - Market Intensity: 30%
-        - Order Flow Alpha: 50%
+        Calculation Order (ORDER FLOW FIRST):
+        1. Order Flow Alpha (60%) - calculated first to get direction
+        2. Trend & Structure (20%) - adjusted by orderflow alignment
+        3. Market Intensity (20%) - amplified/dampened by agreement with orderflow
+
+        Component Alignment:
+        - Market Intensity: +20% if price agrees with orderflow, -20% if conflict
+        - Trend & Structure: +15% if trend confirms orderflow, -15% if contradicts
         """
         # Determine price direction from recent bars
         if len(df) >= 5:
@@ -530,14 +732,40 @@ class AgentBiasCalculator:
         else:
             price_direction = "NEUTRAL"
 
-        # Calculate component scores
-        trend_structure = self.calculate_trend_structure_score(df, sr_levels)
-        market_intensity = self.calculate_market_intensity_score(rvol, vpin, price_direction)
+        # ============================================
+        # 1. Calculate Order Flow Alpha FIRST
+        # ============================================
         orderflow_alpha = self.calculate_orderflow_alpha_score(
             obi_ratio, ldr,
             absorption_signals or [],
-            lsf_signals or [],
             cvd=cvd,
+            delta_unwind_signals=delta_unwind_signals or [],
+            exhaustion_signals=exhaustion_signals or [],
+        )
+
+        # Derive orderflow direction from score
+        # >55 = BULLISH, <45 = BEARISH, else NEUTRAL
+        if orderflow_alpha.score > 55:
+            orderflow_direction = "BULLISH"
+        elif orderflow_alpha.score < 45:
+            orderflow_direction = "BEARISH"
+        else:
+            orderflow_direction = "NEUTRAL"
+
+        # ============================================
+        # 2. Calculate Trend & Structure (with orderflow alignment)
+        # ============================================
+        trend_structure = self.calculate_trend_structure_score(
+            df, sr_levels,
+            orderflow_direction=orderflow_direction
+        )
+
+        # ============================================
+        # 3. Calculate Market Intensity (with orderflow alignment)
+        # ============================================
+        market_intensity = self.calculate_market_intensity_score(
+            rvol, vpin, price_direction,
+            orderflow_direction=orderflow_direction
         )
 
         # Calculate weighted total

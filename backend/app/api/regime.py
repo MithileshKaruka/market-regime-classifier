@@ -227,7 +227,7 @@ async def get_chart_data(
                 low,
                 close,
                 volume
-            FROM order_book
+            FROM ohlcv_ticks
             WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
             AND close BETWEEN {min_price} AND {max_price}
             AND low BETWEEN {min_price} AND {max_price}
@@ -405,7 +405,7 @@ async def get_support_resistance(
         # First, get the current price (most recent close)
         current_price_df = storage.conn.execute(f"""
             SELECT close
-            FROM order_book
+            FROM ohlcv_ticks
             WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
             ORDER BY timestamp DESC
             LIMIT 1
@@ -437,7 +437,7 @@ async def get_support_resistance(
                 low,
                 close,
                 volume
-            FROM order_book
+            FROM ohlcv_ticks
             WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
               AND high >= {price_min} AND low <= {price_max}
             ORDER BY timestamp ASC
@@ -626,7 +626,7 @@ async def get_sr_signals(
                 volume,
                 dom_imbalance,
                 cvd
-            FROM order_book
+            FROM ohlcv_ticks
             WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
             ORDER BY timestamp DESC
             LIMIT {lookback}

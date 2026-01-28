@@ -1,24 +1,25 @@
-"""Live data ingestion from Databento stream with MBP-1 + Trades schemas
+"""Live data ingestion from Databento stream with MBP-1 schema
 
 This module handles real-time market data streaming using:
-- MBP-1: Top-of-book quotes for DOM imbalance and spread
-- Trades: Individual trade executions for accurate CVD/delta
+- MBP-1: Top-of-book quotes for DOM imbalance, delta, and OHLCV
 
-These schemas are available on Databento's personal plan for live streaming.
+Data is aggregated into ohlcv_ticks table and pushed via WebSocket.
+Raw MBP-1 data is archived to DBN files for backtesting.
 """
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List
+from pathlib import Path
+from typing import Optional, Dict, Any, List, Callable
 import databento as db
 import polars as pl
 
 from app.features.order_flow import OrderFlowCalculator
-from app.features.trade_flow import TradeFlowCalculator, merge_quotes_and_trades
 from app.classifiers.regime import RegimeClassifier
 from app.data.storage import DuckDBStorage
 from app.streaming.live_cache import get_cache
-from config import get_config
+from app.api.websocket import get_manager as get_ws_manager
+from config import get_config, get_secrets, get_databento_config
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,49 +29,60 @@ logger = logging.getLogger(__name__)
 
 
 class LiveDataIngestion:
-    """Handles real-time streaming from Databento with MBP-1 + Trades
+    """Handles real-time streaming from Databento with MBP-1
 
-    Subscribes to two schemas:
-    - mbp-1: Top-of-book quotes (best bid/ask)
-    - trades: Individual trade executions
+    Subscribes to MBP-1 schema for:
+    - Top-of-book quotes (best bid/ask)
+    - DOM imbalance calculation
+    - Delta from quote size changes
+    - OHLCV from mid-price
 
-    Combines both to calculate:
-    - DOM imbalance from quotes
-    - True CVD/delta from trade aggressor side
-    - OHLCV from trade prices
+    Data is aggregated into ohlcv_ticks table and pushed via WebSocket.
     """
 
     def __init__(
         self,
-        api_key: str,
+        api_key: Optional[str] = None,
         dataset: Optional[str] = None,
         symbols: Optional[List[str]] = None,
         timeframes: Optional[List[str]] = None,
-        db_path: str = "/data/live.duckdb",
-        flush_interval_seconds: Optional[float] = None
+        db_path: Optional[str] = None,
+        flush_interval_seconds: Optional[float] = None,
+        on_bar_update: Optional[Callable] = None,
+        on_bar_close: Optional[Callable] = None,
+        on_signal: Optional[Callable] = None,
     ):
-        # Load defaults from config
+        # Load config
         config = get_config()
         streaming_config = config.streaming
+        secrets = get_secrets()
+        db_config = get_databento_config()
 
-        self.api_key = api_key
+        self.api_key = api_key or secrets.api_key
         self.dataset = dataset or streaming_config.dataset
         self.symbols = symbols or streaming_config.default_symbols
         self.timeframes = timeframes or streaming_config.default_timeframes
-        self.db_path = db_path
+        self.db_path = db_path or db_config['database'].main_db
         self.flush_interval = flush_interval_seconds or streaming_config.flush_interval_seconds
         self._dom_smoothing = streaming_config.dom_smoothing_factor
+        self._max_buffer = streaming_config.max_buffer_size
+
+        # Callbacks for WebSocket push (use provided or default to WebSocket manager)
+        self._ws_manager = get_ws_manager()
+        self.on_bar_update = on_bar_update or self._default_bar_update
+        self.on_bar_close = on_bar_close or self._default_bar_close
+        self.on_signal = on_signal or self._default_signal
 
         # Calculators - MBP-1 uses 1 level
         self.quote_calculator = OrderFlowCalculator(levels=1)
-        self.trade_calculator = TradeFlowCalculator()
         self.classifier = RegimeClassifier()
         self.cache = get_cache()
 
-        # Separate buffers for quotes and trades
-        self.quote_buffer = []
-        self.trade_buffer = []
-        self.last_flush_time = datetime.utcnow()
+        # DBN archive directory
+        self.archive_dir = Path(db_config['database'].archive_dir)
+        self.archive_dir.mkdir(parents=True, exist_ok=True)
+        self._current_dbn_path: Optional[Path] = None
+        self._current_dbn_date: Optional[str] = None
 
         # Current bars in memory (one per timeframe per symbol)
         self.current_bars: Dict[str, Dict[str, Optional[Dict]]] = {}
@@ -79,12 +91,30 @@ class LiveDataIngestion:
             for symbol in self.symbols:
                 self.current_bars[tf][symbol] = None
 
-        # Track latest quote for each symbol (for combining with trades)
-        self.latest_quotes: Dict[str, Dict[str, Any]] = {s: {} for s in self.symbols}
+        # Running CVD per timeframe/symbol
+        self.running_cvd: Dict[str, Dict[str, int]] = {}
+        for tf in self.timeframes:
+            self.running_cvd[tf] = {s: 0 for s in self.symbols}
+
+        # Track previous quote for delta calculation
+        self.prev_quotes: Dict[str, Dict[str, Any]] = {s: {} for s in self.symbols}
 
         logger.info(f"LiveDataIngestion initialized for {self.symbols}")
         logger.info(f"  Timeframes: {self.timeframes}")
-        logger.info(f"  Schemas: mbp-1 (quotes) + trades")
+        logger.info(f"  Schema: mbp-1")
+        logger.info(f"  DB path: {self.db_path}")
+
+    async def _default_bar_update(self, timeframe: str, symbol: str, bar: dict):
+        """Default callback: push bar update via WebSocket"""
+        await self._ws_manager.send_bar_update(timeframe, symbol, bar)
+
+    async def _default_bar_close(self, timeframe: str, symbol: str, bar: dict):
+        """Default callback: push bar close via WebSocket"""
+        await self._ws_manager.send_bar_close(timeframe, symbol, bar)
+
+    async def _default_signal(self, timeframe: str, symbol: str, signal: dict):
+        """Default callback: push signal via WebSocket"""
+        await self._ws_manager.send_signal(timeframe, symbol, signal)
 
     def get_timeframe_interval(self, timeframe: str) -> timedelta:
         """Convert timeframe string to timedelta"""
@@ -149,201 +179,204 @@ class LiveDataIngestion:
         }
         return trade
 
-    def update_bar_with_trade(self, bar: Optional[dict], trade: dict, quote: dict) -> dict:
-        """Update an existing bar with a new trade"""
-        price = trade['price']
-        size = trade['size']
-        signed_size = size if trade['side'] == 'A' else -size
+    def calculate_delta_from_quote(self, quote: dict, prev_quote: dict) -> int:
+        """Calculate delta from quote size changes
 
-        # Get DOM imbalance from latest quote
-        dom_imbalance = 0.5
-        if quote:
-            total_bid = quote.get('bid_sz_00', 0)
-            total_ask = quote.get('ask_sz_00', 0)
-            if total_bid + total_ask > 0:
-                dom_imbalance = total_bid / (total_bid + total_ask)
+        Delta is inferred from changes in bid/ask sizes:
+        - Decrease in ask size = buy aggression (positive delta)
+        - Decrease in bid size = sell aggression (negative delta)
+        """
+        if not prev_quote:
+            return 0
+
+        bid_change = quote.get('bid_sz_00', 0) - prev_quote.get('bid_sz_00', 0)
+        ask_change = quote.get('ask_sz_00', 0) - prev_quote.get('ask_sz_00', 0)
+
+        # If ask size decreased, someone bought (positive delta)
+        # If bid size decreased, someone sold (negative delta)
+        delta = 0
+        if ask_change < 0:
+            delta += abs(ask_change)  # Buy aggression
+        if bid_change < 0:
+            delta -= abs(bid_change)  # Sell aggression
+
+        return delta
+
+    def update_bar_with_quote(self, bar: Optional[dict], quote: dict, delta: int, bar_timestamp: datetime) -> dict:
+        """Update an existing bar with a new MBP-1 quote"""
+        mid_price = (quote.get('bid_px_00', 0) + quote.get('ask_px_00', 0)) / 2
+
+        # Calculate DOM imbalance
+        total_bid = quote.get('bid_sz_00', 0)
+        total_ask = quote.get('ask_sz_00', 0)
+        dom_imbalance = total_bid / (total_bid + total_ask) if (total_bid + total_ask) > 0 else 0.5
 
         if bar is None:
             # Create new bar
             return {
-                'timestamp': trade['bar_timestamp'],
-                'open': price,
-                'high': price,
-                'low': price,
-                'close': price,
-                'volume': size,
+                'timestamp': bar_timestamp,
+                'open': mid_price,
+                'high': mid_price,
+                'low': mid_price,
+                'close': mid_price,
+                'volume': 1,
+                'instant_delta': delta,
                 'dom_imbalance': dom_imbalance,
-                'delta': signed_size,
-                'vwap': price,
-                'trade_count': 1,
-                'price_volume_sum': price * size,
+                'total_bid_depth': total_bid,
+                'total_ask_depth': total_ask,
+                'tick_count': 1,
             }
         else:
             # Update existing bar
-            bar['high'] = max(bar['high'], price)
-            bar['low'] = min(bar['low'], price)
-            bar['close'] = price
-            bar['volume'] += size
-            bar['delta'] += signed_size
-            bar['trade_count'] += 1
-            bar['price_volume_sum'] += price * size
-            bar['vwap'] = bar['price_volume_sum'] / bar['volume']
-            # Update DOM imbalance (exponential moving average using config smoothing factor)
+            bar['high'] = max(bar['high'], mid_price)
+            bar['low'] = min(bar['low'], mid_price)
+            bar['close'] = mid_price
+            bar['volume'] += 1
+            bar['instant_delta'] += delta
+            bar['tick_count'] += 1
+            # Update DOM imbalance (exponential moving average)
             bar['dom_imbalance'] = self._dom_smoothing * bar['dom_imbalance'] + (1 - self._dom_smoothing) * dom_imbalance
+            # Update depth (simple average)
+            bar['total_bid_depth'] = (bar['total_bid_depth'] * (bar['tick_count'] - 1) + total_bid) / bar['tick_count']
+            bar['total_ask_depth'] = (bar['total_ask_depth'] * (bar['tick_count'] - 1) + total_ask) / bar['tick_count']
             return bar
 
-    async def process_quote(self, quote: dict, symbol: str):
-        """Process a quote update - just store latest for combining with trades"""
-        self.latest_quotes[symbol] = quote
-        self.quote_buffer.append(quote)
-
-    async def process_trade(self, trade: dict, symbol: str):
-        """Process a trade and update bars"""
+    async def process_mbp_tick(self, quote: dict, symbol: str):
+        """Process an MBP-1 tick and update bars for all timeframes"""
         try:
-            # Get latest quote for this symbol
-            latest_quote = self.latest_quotes.get(symbol, {})
+            # Calculate delta from quote change
+            prev_quote = self.prev_quotes.get(symbol, {})
+            delta = self.calculate_delta_from_quote(quote, prev_quote)
+            self.prev_quotes[symbol] = quote
 
             # Convert timestamp
-            trade_ts = datetime.fromtimestamp(trade['ts_event'] / 1e9)
+            tick_ts = datetime.fromtimestamp(quote['ts_event'] / 1e9)
 
             # Update bars for each timeframe
             for tf in self.timeframes:
-                bar_ts = self.truncate_timestamp(trade_ts, tf)
-                trade['bar_timestamp'] = bar_ts
-
+                bar_ts = self.truncate_timestamp(tick_ts, tf)
                 current_bar = self.current_bars[tf][symbol]
 
                 # Check if we need a new bar
                 if current_bar is None or current_bar['timestamp'] != bar_ts:
-                    # Save previous bar if exists
+                    # Save previous bar if exists (bar closed)
                     if current_bar is not None:
-                        # Classify regime for completed bar
-                        regime = self.classifier.classify_single(
-                            dom_imbalance=current_bar['dom_imbalance'],
-                            delta=current_bar['delta'],
-                            vwap=current_bar['vwap'],
-                            price=current_bar['close']
-                        )
+                        # Update running CVD
+                        self.running_cvd[tf][symbol] += current_bar['instant_delta']
+                        current_bar['cvd'] = self.running_cvd[tf][symbol]
 
-                        # Update cache
-                        self.cache.update_bar(tf, symbol, current_bar)
-                        self.cache.update_regime(tf, symbol, {
-                            'timeframe': tf,
-                            'symbol': symbol,
-                            'regime': regime['regime'],
-                            'confidence': regime['confidence'],
-                            'key_signal': regime['key_signal'],
-                            'dom_imbalance': current_bar['dom_imbalance'],
-                            'delta': current_bar['delta'],
-                            'timestamp': current_bar['timestamp']
-                        })
+                        # Store completed bar
+                        await self._store_completed_bar(tf, symbol, current_bar)
+
+                        # Callback for bar close
+                        if self.on_bar_close:
+                            await self.on_bar_close(tf, symbol, current_bar)
 
                     # Start new bar
-                    current_bar = self.update_bar_with_trade(None, trade, latest_quote)
+                    current_bar = self.update_bar_with_quote(None, quote, delta, bar_ts)
                     self.current_bars[tf][symbol] = current_bar
                 else:
                     # Update existing bar
-                    current_bar = self.update_bar_with_trade(current_bar, trade, latest_quote)
+                    current_bar = self.update_bar_with_quote(current_bar, quote, delta, bar_ts)
                     self.current_bars[tf][symbol] = current_bar
 
-                    # Update cache with current bar
-                    self.cache.update_bar(tf, symbol, current_bar)
+                # Update CVD on current bar
+                current_bar['cvd'] = self.running_cvd[tf][symbol] + current_bar['instant_delta']
 
-                    # Classify and cache regime
-                    regime = self.classifier.classify_single(
-                        dom_imbalance=current_bar['dom_imbalance'],
-                        delta=current_bar['delta'],
-                        vwap=current_bar['vwap'],
-                        price=current_bar['close']
-                    )
-                    self.cache.update_regime(tf, symbol, {
-                        'timeframe': tf,
-                        'symbol': symbol,
-                        'regime': regime['regime'],
-                        'confidence': regime['confidence'],
-                        'key_signal': regime['key_signal'],
-                        'dom_imbalance': current_bar['dom_imbalance'],
-                        'delta': current_bar['delta'],
-                        'timestamp': current_bar['timestamp']
-                    })
+                # Update cache
+                self.cache.update_bar(tf, symbol, current_bar)
 
-            # Add to buffer for DB flush
-            self.trade_buffer.append(trade)
+                # Callback for bar update
+                if self.on_bar_update:
+                    await self.on_bar_update(tf, symbol, current_bar)
 
         except Exception as e:
-            logger.error(f"Error processing trade: {e}", exc_info=True)
+            logger.error(f"Error processing MBP tick: {e}", exc_info=True)
 
-    async def flush_to_database(self):
-        """Flush buffered data to DuckDB"""
-        if len(self.trade_buffer) == 0:
-            return
-
+    async def _store_completed_bar(self, timeframe: str, symbol: str, bar: dict):
+        """Store a completed bar to the database"""
         try:
-            logger.info(f"Flushing {len(self.trade_buffer)} trades to database...")
-
-            # Convert trade buffer to DataFrame
-            df_trades = pl.DataFrame(self.trade_buffer)
-
-            # Calculate trade features
-            df_trades = self.trade_calculator.calculate_all_features(df_trades)
-
-            # Convert quote buffer if available
-            df_quotes = None
-            if self.quote_buffer:
-                df_quotes = pl.DataFrame(self.quote_buffer)
-                df_quotes = self.quote_calculator.calculate_all_features(df_quotes)
-
-            # Store for each timeframe
             with DuckDBStorage(db_path=self.db_path) as storage:
-                for tf in self.timeframes:
-                    df_tf = self.trade_calculator.resample_to_timeframe(df_trades, tf)
+                df = pl.DataFrame([{
+                    'timestamp': bar['timestamp'],
+                    'symbol': symbol,
+                    'timeframe': timeframe,
+                    'open': bar['open'],
+                    'high': bar['high'],
+                    'low': bar['low'],
+                    'close': bar['close'],
+                    'volume': bar['volume'],
+                    'instant_delta': bar['instant_delta'],
+                    'dom_imbalance': bar['dom_imbalance'],
+                    'total_bid_depth': bar['total_bid_depth'],
+                    'total_ask_depth': bar['total_ask_depth'],
+                    'cvd': bar['cvd'],
+                }])
+                storage.insert_ohlcv_ticks(df, symbol=symbol, timeframe=timeframe)
 
-                    if df_quotes is not None and len(df_quotes) > 0:
-                        df_quotes_tf = self.quote_calculator.resample_to_timeframe(df_quotes, tf)
-                        df_tf = merge_quotes_and_trades(df_quotes_tf, df_tf, tf)
+            # Classify regime
+            regime = self.classifier.classify_single(
+                dom_imbalance=bar['dom_imbalance'],
+                delta=bar['instant_delta'],
+                vwap=bar['close'],  # Using close as VWAP proxy
+                price=bar['close']
+            )
 
-                    if len(df_tf) > 0:
-                        df_tf = df_tf.with_columns([
-                            pl.lit(tf).alias("timeframe")
-                        ])
-
-                        # Classify regimes
-                        df_classified = self.classifier.classify_dataframe(df_tf)
-
-                        # Store in DuckDB
-                        storage.insert_order_book_data(df_tf, symbol="MNQ", timeframe=tf)
-                        storage.insert_regime_data(df_classified, symbol="MNQ")
-
-            logger.info(f"✓ Flushed to database")
-
-            # Clear buffers
-            self.trade_buffer.clear()
-            self.quote_buffer.clear()
+            # Update regime cache
+            self.cache.update_regime(timeframe, symbol, {
+                'timeframe': timeframe,
+                'symbol': symbol,
+                'regime': regime['regime'],
+                'confidence': regime['confidence'],
+                'key_signal': regime['key_signal'],
+                'dom_imbalance': bar['dom_imbalance'],
+                'delta': bar['instant_delta'],
+                'timestamp': bar['timestamp']
+            })
 
         except Exception as e:
-            logger.error(f"Error flushing to database: {e}", exc_info=True)
+            logger.error(f"Error storing completed bar: {e}", exc_info=True)
 
-    async def check_and_flush_database(self):
-        """Check if it's time to flush to database"""
-        now = datetime.utcnow()
-        elapsed = (now - self.last_flush_time).total_seconds()
+    def get_dbn_path(self) -> Path:
+        """Get the current compressed DBN archive file path (rotates daily)
 
-        if elapsed >= self.flush_interval:
-            await self.flush_to_database()
-            self.last_flush_time = now
+        Uses .dbn.zst (zstd compression) for minimal disk footprint.
+        """
+        today = datetime.utcnow().strftime('%Y-%m-%d')
+
+        if self._current_dbn_date != today:
+            self._current_dbn_date = today
+            # Always use .dbn.zst for compression
+            self._current_dbn_path = self.archive_dir / f"mbp1_{today}.dbn.zst"
+            logger.info(f"DBN archive file (zstd compressed): {self._current_dbn_path}")
+
+        return self._current_dbn_path
 
     async def start_streaming(self):
-        """Start consuming live market data from both schemas"""
-        logger.info("="*60)
-        logger.info("Starting live data ingestion (MBP-1 + Trades)...")
+        """Start consuming live market data from MBP-1 schema
+
+        Raw MBP-1 data is automatically archived to daily DBN files
+        using Databento's native streaming. Records are also processed
+        in real-time to update ohlcv_ticks and push via WebSocket.
+        """
+        if not self.api_key:
+            raise ValueError("Databento API key not configured. Set DATABENTO_API_KEY or update secrets.yaml")
+
+        logger.info("=" * 60)
+        logger.info("Starting live data ingestion (MBP-1)...")
         logger.info(f"  Symbols: {self.symbols}")
         logger.info(f"  Timeframes: {self.timeframes}")
-        logger.info(f"  DB flush interval: {self.flush_interval}s")
-        logger.info("="*60)
+        logger.info(f"  Archive dir: {self.archive_dir}")
+        logger.info("=" * 60)
 
         client = db.Live(key=self.api_key)
 
         try:
+            # Add DBN file stream for archiving raw data
+            dbn_path = self.get_dbn_path()
+            client.add_stream(str(dbn_path))
+            logger.info(f"Archiving to DBN: {dbn_path}")
+
             # Subscribe to MBP-1 (top-of-book quotes)
             client.subscribe(
                 dataset=self.dataset,
@@ -351,48 +384,35 @@ class LiveDataIngestion:
                 symbols=self.symbols,
                 stype_in="parent",
             )
-            logger.info("✓ Subscribed to MBP-1 (quotes)")
+            logger.info("Subscribed to MBP-1")
 
-            # Subscribe to Trades
-            client.subscribe(
-                dataset=self.dataset,
-                schema="trades",
-                symbols=self.symbols,
-                stype_in="parent",
-            )
-            logger.info("✓ Subscribed to Trades")
-
-            quote_count = 0
-            trade_count = 0
+            tick_count = 0
+            last_date = datetime.utcnow().strftime('%Y-%m-%d')
 
             async for record in client:
                 record_type = type(record).__name__
 
                 if record_type == "MBP1Msg":
-                    # Quote update
+                    # Quote update - process and update bars
                     quote = self.extract_quote(record)
-                    await self.process_quote(quote, symbol="MNQ")
-                    quote_count += 1
+                    await self.process_mbp_tick(quote, symbol="MNQ")
+                    tick_count += 1
 
-                elif record_type == "TradeMsg":
-                    # Trade execution
-                    trade = self.extract_trade(record)
-                    await self.process_trade(trade, symbol="MNQ")
-                    trade_count += 1
-
-                # Periodic flush to database
-                await self.check_and_flush_database()
+                # Check for daily file rotation
+                current_date = datetime.utcnow().strftime('%Y-%m-%d')
+                if current_date != last_date:
+                    # Rotate to new daily DBN file
+                    new_dbn_path = self.get_dbn_path()
+                    client.add_stream(str(new_dbn_path))
+                    logger.info(f"Rotated DBN archive to: {new_dbn_path}")
+                    last_date = current_date
 
                 # Log progress
-                if (quote_count + trade_count) % 1000 == 0:
-                    logger.info(
-                        f"Processed {quote_count:,} quotes, {trade_count:,} trades, "
-                        f"buffer: {len(self.trade_buffer)}"
-                    )
+                if tick_count % 10000 == 0:
+                    logger.info(f"Processed {tick_count:,} ticks")
 
         except KeyboardInterrupt:
             logger.info("\nShutting down...")
-            await self.flush_to_database()
         except Exception as e:
             logger.error(f"Streaming error: {e}", exc_info=True)
             raise
@@ -403,20 +423,8 @@ class LiveDataIngestion:
 
 async def main():
     """Entry point for live streaming service"""
-    import os
-
-    api_key = os.getenv("DATABENTO_API_KEY")
-    if not api_key:
-        raise ValueError("DATABENTO_API_KEY environment variable not set")
-
-    db_path = os.getenv("LIVE_DB_PATH", "data/live.duckdb")
-
-    ingestion = LiveDataIngestion(
-        api_key=api_key,
-        db_path=db_path,
-        flush_interval_seconds=1.0
-    )
-
+    # Config is loaded automatically from secrets.yaml and databento_config.yaml
+    ingestion = LiveDataIngestion()
     await ingestion.start_streaming()
 
 
