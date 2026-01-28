@@ -24,7 +24,7 @@ Usage:
 import sys
 import argparse
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -37,7 +37,8 @@ from config import get_secrets
 DEFAULT_OHLCV_YEARS = 5
 DEFAULT_MBP_DAYS = 60
 DATASET = "GLBX.MDP3"
-SYMBOL = "MNQ.FUT"
+SYMBOL = "MNQ.c.0"  # Continuous front-month contract
+STYPE_IN = "continuous"
 
 
 def get_date_ranges(
@@ -55,7 +56,7 @@ def get_date_ranges(
     Returns:
         Dict with start/end dates for each schema
     """
-    today = datetime.utcnow().date()
+    today = datetime.now(timezone.utc).date()
 
     # OHLCV: 5 years back (or custom start)
     if ohlcv_start:
@@ -104,6 +105,7 @@ def estimate_cost(api_key: str, date_ranges: dict) -> dict:
         ohlcv_cost = client.metadata.get_cost(
             dataset=DATASET,
             symbols=[SYMBOL],
+            stype_in=STYPE_IN,
             schema="ohlcv-1m",
             start=date_ranges['ohlcv']['start'],
             end=date_ranges['ohlcv']['end'],
@@ -121,6 +123,7 @@ def estimate_cost(api_key: str, date_ranges: dict) -> dict:
         mbp_cost = client.metadata.get_cost(
             dataset=DATASET,
             symbols=[SYMBOL],
+            stype_in=STYPE_IN,
             schema="mbp-1",
             start=date_ranges['mbp']['start'],
             end=date_ranges['mbp']['end'],
@@ -166,6 +169,7 @@ def download_ohlcv(api_key: str, start: str, end: str, output_dir: Path) -> Opti
         client.timeseries.get_range(
             dataset=DATASET,
             symbols=[SYMBOL],
+            stype_in=STYPE_IN,
             schema="ohlcv-1m",
             start=start,
             end=end,
@@ -206,6 +210,7 @@ def download_mbp(api_key: str, start: str, end: str, output_dir: Path) -> Option
         client.timeseries.get_range(
             dataset=DATASET,
             symbols=[SYMBOL],
+            stype_in=STYPE_IN,
             schema="mbp-1",
             start=start,
             end=end,
