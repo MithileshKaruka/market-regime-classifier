@@ -230,6 +230,10 @@ async def get_simplified_metrics():
                 row = df.row(0, named=True)
                 dom = row["dom_imbalance"]
 
+                # Skip if dom_imbalance is null or NaN
+                if dom is None or (isinstance(dom, float) and dom != dom):
+                    continue
+
                 # Classify direction using config threshold
                 config = get_config()
                 dom_threshold = config.regime.thresholds.dom_threshold
