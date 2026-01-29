@@ -431,12 +431,14 @@ class LiveDataIngestion:
                 record_type = type(record).__name__
 
                 if record_type == "SymbolMappingMsg":
-                    # Map instrument_id to our config symbol (stype_in_symbol)
+                    # Map instrument_id to normalized symbol
                     instrument_id = record.instrument_id
-                    # stype_in_symbol is our parent symbol (e.g., "MNQ.FUT")
-                    symbol = record.stype_in_symbol
+                    # stype_in_symbol is parent symbol (e.g., "MNQ.FUT") - normalize to "MNQ"
+                    raw_symbol = record.stype_in_symbol
+                    # Normalize: "MNQ.FUT" -> "MNQ", "ES.FUT" -> "ES", etc.
+                    symbol = raw_symbol.split('.')[0] if '.' in raw_symbol else raw_symbol
                     self.instrument_id_to_symbol[instrument_id] = symbol
-                    logger.info(f"Symbol mapping: instrument_id={instrument_id} -> {symbol}")
+                    logger.info(f"Symbol mapping: instrument_id={instrument_id} -> {raw_symbol} (normalized: {symbol})")
 
                 elif record_type == "MBP1Msg":
                     # Quote update - process and update bars
