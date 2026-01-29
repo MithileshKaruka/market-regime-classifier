@@ -246,6 +246,11 @@ def load_ohlcv_file(file_path: Path):
     with DuckDBStorage() as storage:
         ensure_ohlcv_table(storage)
 
+        # Clear existing OHLCV data for fresh import
+        print("Clearing existing OHLCV data...")
+        storage.conn.execute("DELETE FROM ohlcv_ticks WHERE symbol = 'MNQ'")
+        storage.conn.commit()
+
         # Load and process
         df_1m = load_ohlcv_from_dbn(file_path)
         df_1m = filter_ohlcv_data(df_1m)
@@ -553,7 +558,7 @@ Examples:
                 api_key,
                 date_ranges['mbp']['start'],
                 date_ranges['mbp']['end'],
-                days_per_chunk=3  # 3 days at a time to avoid OOM
+                days_per_chunk=1  # 1 day at a time for limited RAM
             )
 
         # Print summary

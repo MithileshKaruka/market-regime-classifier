@@ -330,7 +330,7 @@ def aggregate_mbp_to_ohlcv(storage):
         if tf in ("4H", "1D"):
             # CME session boundary alignment
             storage.conn.execute(f"""
-                INSERT INTO ohlcv_ticks
+                INSERT OR REPLACE INTO ohlcv_ticks
                 WITH shifted AS (
                     SELECT
                         timestamp + INTERVAL '{CME_SESSION_OFFSET_HOURS} hours' as shifted_ts,
@@ -369,7 +369,7 @@ def aggregate_mbp_to_ohlcv(storage):
         else:
             # Standard time bucketing for intraday timeframes
             storage.conn.execute(f"""
-                INSERT INTO ohlcv_ticks
+                INSERT OR REPLACE INTO ohlcv_ticks
                 WITH bars AS (
                     SELECT
                         time_bucket(INTERVAL '{interval}', timestamp) as timestamp,

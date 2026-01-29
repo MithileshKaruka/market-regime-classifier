@@ -10,6 +10,12 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+# Load .env file if it exists
+from dotenv import load_dotenv
+env_path = Path(__file__).parent.parent / ".env"
+if env_path.exists():
+    load_dotenv(env_path)
+
 logger = logging.getLogger(__name__)
 
 # Default config paths
