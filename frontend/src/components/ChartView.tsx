@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useCallback } from 'react'
 import { createChart } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi } from 'lightweight-charts'
 import {
@@ -11,8 +11,11 @@ import {
   ALL_INDICATOR_KEYS,
   AVAILABLE_INDICATORS,
   LABELS,
+  SYMBOL_CONFIG,
   type Timeframe,
 } from '../config'
+import { useWebSocket } from '../hooks/useWebSocket'
+import type { BarData, SignalData } from '../types/websocket'
 import './ChartView.css'
 
 interface ChartBar {
@@ -96,6 +99,94 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
   useEffect(() => {
     isLoadingMoreRef.current = isLoadingMore
   }, [isLoadingMore])
+
+  // ============================================================================
+  // WebSocket Real-time Updates
+  // ============================================================================
+
+  // Convert ISO timestamp to Unix seconds for lightweight-charts
+  const parseTimestamp = useCallback((isoString: string): number => {
+    return Math.floor(new Date(isoString).getTime() / 1000)
+  }, [])
+
+  // Handle real-time bar updates from WebSocket
+  const handleBarUpdate = useCallback((data: BarData) => {
+    if (!candlestickSeriesRef.current || !volumeSeriesRef.current) return
+
+    const time = parseTimestamp(data.timestamp)
+
+    // Update candlestick (creates new bar or updates existing rightmost bar)
+    candlestickSeriesRef.current.update({
+      time: time as any,
+      open: data.open,
+      high: data.high,
+      low: data.low,
+      close: data.close,
+    })
+
+    // Update volume
+    volumeSeriesRef.current.update({
+      time: time as any,
+      value: data.volume,
+      color: data.close >= data.open ? COLORS.chart.volumeUp : COLORS.chart.volumeDown,
+    })
+  }, [parseTimestamp])
+
+  // Handle bar close - finalize the bar and update state
+  const handleBarClose = useCallback((data: BarData) => {
+    // Update chart one final time
+    handleBarUpdate(data)
+
+    // Update loaded bars state to include the finalized bar
+    const time = parseTimestamp(data.timestamp)
+    setLoadedBars(prev => {
+      const idx = prev.findIndex(b => b.time === time)
+      const newBar: ChartBar = {
+        time,
+        open: data.open,
+        high: data.high,
+        low: data.low,
+        close: data.close,
+        volume: data.volume,
+        regime: '',
+      }
+
+      if (idx >= 0) {
+        const updated = [...prev]
+        updated[idx] = newBar
+        return updated
+      }
+      return [...prev, newBar]
+    })
+  }, [handleBarUpdate, parseTimestamp])
+
+  // Handle new signals from WebSocket
+  const handleSignal = useCallback((data: SignalData) => {
+    if (!showOrderflowSignals) return
+
+    // Add new signal to state - the existing useEffect will handle markers
+    setOrderflowSignals(prev => {
+      const newSignal: OrderflowSignal = {
+        timestamp: data.timestamp,
+        signal_type: data.signal_type,
+        direction: data.direction,
+        price: data.price,
+        strength: data.strength,
+        details: data.details,
+      }
+      // Append and sort by timestamp
+      return [...prev, newSignal].sort((a, b) => a.timestamp - b.timestamp)
+    })
+  }, [showOrderflowSignals])
+
+  // Subscribe to WebSocket for real-time updates
+  const { isConnected } = useWebSocket({
+    timeframe,
+    symbol: SYMBOL_CONFIG.backendSymbol,
+    onBarUpdate: handleBarUpdate,
+    onBarClose: handleBarClose,
+    onSignal: handleSignal,
+  })
 
   useEffect(() => {
     if (!chartContainerRef.current) return
@@ -690,6 +781,18 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
         <span style={{ fontSize: '11px', color: COLORS.text.muted }}>
           {loadedBars.length > 0 && `${loadedBars.length.toLocaleString()} / ${totalBars.toLocaleString()} bars`}
         </span>
+        {isConnected && (
+          <span style={{
+            fontSize: '10px',
+            color: COLORS.bullish,
+            fontWeight: 600,
+            display: 'flex',
+            alignItems: 'center',
+            gap: '4px'
+          }}>
+            <span style={{ fontSize: '8px' }}>●</span> LIVE
+          </span>
+        )}
         <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
           <button
             onClick={() => setIsDarkBackground(!isDarkBackground)}

@@ -1,0 +1,30 @@
+.connection-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  margin-left: auto;
+  margin-right: 16px;
+}
+
+.status-icon {
+  font-size: 10px;
+}
+
+.status-icon.pulse {
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.status-label {
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}

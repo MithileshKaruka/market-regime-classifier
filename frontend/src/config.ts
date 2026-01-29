@@ -33,6 +33,32 @@ export const API_CONFIG = {
 export const API_BASE_URL = API_CONFIG.baseUrl
 
 // ============================================================================
+// WebSocket Configuration
+// ============================================================================
+export const WEBSOCKET_CONFIG = {
+  path: '/ws/live',
+  reconnectAttempts: 5,
+  reconnectDelayBase: 1000,  // ms, doubles each attempt
+  heartbeatInterval: 25000,  // ms, server sends at 30s
+} as const
+
+// ============================================================================
+// Symbol Configuration
+// ============================================================================
+export const SYMBOL_CONFIG = {
+  displaySymbol: 'MNQ',
+  backendSymbol: 'MNQ.FUT',
+} as const
+
+export function toBackendSymbol(display: string): string {
+  return `${display}.FUT`
+}
+
+export function toDisplaySymbol(backend: string): string {
+  return backend.replace('.FUT', '')
+}
+
+// ============================================================================
 // Color Palette
 // ============================================================================
 export const COLORS = {
