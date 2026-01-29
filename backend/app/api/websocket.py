@@ -2,7 +2,7 @@
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Set, Dict, Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from config import get_websocket_config
@@ -91,7 +91,7 @@ class ConnectionManager:
             "timeframe": timeframe,
             "symbol": symbol,
             "data": bar,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         await self.send_to_subscribers(f"{timeframe}:{symbol}", message)
 
@@ -102,7 +102,7 @@ class ConnectionManager:
             "timeframe": timeframe,
             "symbol": symbol,
             "data": bar,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         await self.send_to_subscribers(f"{timeframe}:{symbol}", message)
 
@@ -113,7 +113,7 @@ class ConnectionManager:
             "timeframe": timeframe,
             "symbol": symbol,
             "data": signal,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         await self.send_to_subscribers(f"{timeframe}:{symbol}", message)
 
@@ -124,7 +124,7 @@ class ConnectionManager:
             "timeframe": timeframe,
             "symbol": symbol,
             "data": regime,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         await self.send_to_subscribers(f"{timeframe}:{symbol}", message)
 
