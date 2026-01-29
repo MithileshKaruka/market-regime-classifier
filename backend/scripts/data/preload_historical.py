@@ -279,38 +279,38 @@ def load_mbp_file(file_path: Path, chunk_size: int = 1_000_000):
     print("  Or run download_and_load_mbp_chunked() for streaming load")
 
 
-def download_and_load_mbp_chunked(api_key: str, start_date: str, end_date: str, days_per_chunk: int = 3):
-    """Download and load MBP data in small date chunks to manage memory
+def download_and_load_mbp_chunked(api_key: str, start_date: str, end_date: str, days_per_chunk: int = 1):
+    """Download MBP data and aggregate directly to OHLCV bars (memory efficient)
 
     Args:
         api_key: Databento API key
         start_date: Start date YYYY-MM-DD
         end_date: End date YYYY-MM-DD
-        days_per_chunk: Days per download chunk (default 3)
+        days_per_chunk: Days per download chunk (default 1)
     """
     import polars as pl
-    from scripts.data.load_historical_data import (
-        ensure_mbp_table,
-        ensure_ohlcv_table,
-        aggregate_mbp_to_ohlcv,
-    )
+    from scripts.data.load_historical_data import ensure_ohlcv_table
 
-    print(f"\nDownloading and loading MBP-1 in {days_per_chunk}-day chunks...")
+    print(f"\nDownloading MBP-1 and aggregating to OHLCV bars...")
     print(f"  Range: {start_date} to {end_date}")
+    print(f"  (Aggregating directly - not storing raw ticks)")
 
     start = datetime.strptime(start_date, '%Y-%m-%d').date()
     end = datetime.strptime(end_date, '%Y-%m-%d').date()
 
+    timeframes = {
+        "5M": "5m",
+        "15M": "15m",
+        "1H": "1h",
+        "4H": "4h",
+        "1D": "1d",
+    }
+
     with DuckDBStorage() as storage:
-        ensure_mbp_table(storage)
         ensure_ohlcv_table(storage)
 
-        # Clear existing MBP data
-        storage.conn.execute("DELETE FROM mbp_ticks")
-        storage.conn.commit()
-
         client = db.Historical(api_key)
-        total_inserted = 0
+        total_bars = 0
         chunk_num = 0
         current = start
 
@@ -345,33 +345,60 @@ def download_and_load_mbp_chunked(api_key: str, start_date: str, end_date: str, 
 
                 print(f"    Downloaded: {len(df):,} records")
 
-                # Convert and process
+                # Convert to polars and process
                 df_pl = pl.from_pandas(df)
-                df_ticks = _process_mbp_chunk(df_pl)
+                df_processed = _process_mbp_chunk(df_pl)
 
-                if len(df_ticks) > 0:
-                    storage.conn.execute("INSERT INTO mbp_ticks SELECT * FROM df_ticks")
-                    storage.conn.commit()
-                    total_inserted += len(df_ticks)
+                # Free original dataframes
+                del df, df_pl, data
 
-                print(f"    Inserted: {len(df_ticks):,} ticks (total: {total_inserted:,})")
+                # Aggregate directly to each timeframe
+                chunk_bars = 0
+                for tf, duration in timeframes.items():
+                    df_agg = df_processed.group_by_dynamic(
+                        "timestamp", every=duration, closed="left", label="left"
+                    ).agg([
+                        pl.col("mid_price").first().alias("open"),
+                        pl.col("mid_price").max().alias("high"),
+                        pl.col("mid_price").min().alias("low"),
+                        pl.col("mid_price").last().alias("close"),
+                        pl.len().alias("volume"),
+                        pl.col("delta").sum().alias("instant_delta"),
+                        pl.col("dom_imbalance").mean().alias("dom_imbalance"),
+                        pl.col("bid_size").mean().cast(pl.Float64).alias("total_bid_depth"),
+                        pl.col("ask_size").mean().cast(pl.Float64).alias("total_ask_depth"),
+                    ]).with_columns([
+                        pl.lit("MNQ").alias("symbol"),
+                        pl.lit(tf).alias("timeframe"),
+                        pl.lit(0).cast(pl.Int64).alias("cvd"),  # Will compute rolling later
+                    ])
+
+                    # Reorder columns to match table schema
+                    df_insert = df_agg.select([
+                        "timestamp", "symbol", "timeframe", "open", "high", "low", "close",
+                        "volume", "instant_delta", "dom_imbalance", "total_bid_depth",
+                        "total_ask_depth", "cvd"
+                    ])
+
+                    if len(df_insert) > 0:
+                        storage.conn.execute("INSERT OR REPLACE INTO ohlcv_ticks SELECT * FROM df_insert")
+                        chunk_bars += len(df_insert)
+
+                storage.conn.commit()
+                total_bars += chunk_bars
+                print(f"    Aggregated: {chunk_bars} bars (total: {total_bars})")
 
                 # Free memory
-                del df, df_pl, df_ticks, data
+                del df_processed
 
             except Exception as e:
                 print(f"    Error: {e}")
+                import traceback
+                traceback.print_exc()
 
             current = chunk_end
 
-        print(f"\n  Total inserted: {total_inserted:,} ticks")
-
-        # Aggregate to OHLCV
-        if total_inserted > 0:
-            print("  Aggregating to OHLCV bars...")
-            aggregate_mbp_to_ohlcv(storage)
-            storage.conn.commit()
-
+        print(f"\n  Total bars created: {total_bars}")
         print("  Done!")
 
 
@@ -380,6 +407,12 @@ def _process_mbp_chunk(df: "pl.DataFrame") -> "pl.DataFrame":
     import polars as pl
 
     symbol = "MNQ"
+
+    # Cast size columns to signed int to allow subtraction/negation
+    df = df.with_columns([
+        pl.col("bid_sz_00").cast(pl.Int64).alias("bid_sz_00"),
+        pl.col("ask_sz_00").cast(pl.Int64).alias("ask_sz_00"),
+    ])
 
     # Calculate mid price and spread
     df = df.with_columns([
@@ -398,7 +431,7 @@ def _process_mbp_chunk(df: "pl.DataFrame") -> "pl.DataFrame":
         (
             pl.when(pl.col("ask_change") < 0).then(-pl.col("ask_change")).otherwise(0) -
             pl.when(pl.col("bid_change") < 0).then(-pl.col("bid_change")).otherwise(0)
-        ).cast(pl.Int64).alias("delta")
+        ).alias("delta")
     ])
 
     # Calculate DOM imbalance
