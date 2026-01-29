@@ -209,9 +209,24 @@ class LiveDataIngestion:
 
         return delta
 
-    def update_bar_with_quote(self, bar: Optional[dict], quote: dict, delta: int, bar_timestamp: datetime) -> dict:
-        """Update an existing bar with a new MBP-1 quote"""
-        mid_price = (quote.get('bid_px_00', 0) + quote.get('ask_px_00', 0)) / 2
+    def update_bar_with_quote(self, bar: Optional[dict], quote: dict, delta: int, bar_timestamp: datetime) -> Optional[dict]:
+        """Update an existing bar with a new MBP-1 quote
+
+        Returns None if quote is invalid (bad spread, price out of range)
+        """
+        bid_px = quote.get('bid_px_00', 0)
+        ask_px = quote.get('ask_px_00', 0)
+
+        # Skip invalid quotes
+        if bid_px <= 0 or ask_px <= 0:
+            return bar
+
+        mid_price = (bid_px + ask_px) / 2
+        spread = ask_px - bid_px
+
+        # Filter bad quotes: wide spread (>0.5% of price) or price out of range
+        if spread / mid_price > 0.005 or mid_price < 10000 or mid_price > 50000:
+            return bar  # Keep existing bar unchanged
 
         # Calculate DOM imbalance
         total_bid = quote.get('bid_sz_00', 0)

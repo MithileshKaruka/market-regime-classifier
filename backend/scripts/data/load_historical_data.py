@@ -101,11 +101,11 @@ def filter_ohlcv_data(df: pl.DataFrame) -> pl.DataFrame:
     bars_before = len(df)
 
     df = df.filter(
-        (pl.col("open") >= 10000) & (pl.col("open") <= 30000) &
-        (pl.col("high") >= 10000) & (pl.col("high") <= 30000) &
-        (pl.col("low") >= 10000) & (pl.col("low") <= 30000) &
-        (pl.col("close") >= 10000) & (pl.col("close") <= 30000) &
-        (((pl.col("high") - pl.col("low")) / pl.col("close")) < 0.02) &
+        (pl.col("open") >= 10000) & (pl.col("open") <= 50000) &
+        (pl.col("high") >= 10000) & (pl.col("high") <= 50000) &
+        (pl.col("low") >= 10000) & (pl.col("low") <= 50000) &
+        (pl.col("close") >= 10000) & (pl.col("close") <= 50000) &
+        (((pl.col("high") - pl.col("low")) / pl.col("close")) < 0.01) &  # 1% max for 1-min bars
         (pl.col("low") <= pl.col("open")) &
         (pl.col("low") <= pl.col("close")) &
         (pl.col("high") >= pl.col("open")) &
@@ -133,7 +133,15 @@ def resample_to_timeframe(df: pl.DataFrame, timeframe: str) -> pl.DataFrame:
         pl.col("volume").sum(),
     ])
 
-    return df_resampled.drop_nulls()
+    df_resampled = df_resampled.drop_nulls()
+
+    # Post-resample filter: only remove extreme outliers (>3%)
+    # OHLCV data from DBN is already validated, don't filter legitimate volatility
+    df_resampled = df_resampled.filter(
+        ((pl.col("high") - pl.col("low")) / pl.col("close") < 0.03)
+    )
+
+    return df_resampled
 
 
 def load_mbp1_from_dbn(file_path: Path) -> pl.DataFrame:
@@ -329,6 +337,7 @@ def aggregate_mbp_to_ohlcv(storage):
         # Shift timestamps by 6 hours, bucket, then shift back
         if tf in ("4H", "1D"):
             # CME session boundary alignment
+            # Two-pass approach: first compute median, then filter outliers and aggregate
             storage.conn.execute(f"""
                 INSERT OR REPLACE INTO ohlcv_ticks
                 WITH shifted AS (
@@ -337,6 +346,21 @@ def aggregate_mbp_to_ohlcv(storage):
                         mid_price, delta, dom_imbalance, total_bid_depth, total_ask_depth
                     FROM mbp_ticks
                     WHERE symbol = 'MNQ'
+                    AND spread / mid_price < 0.005
+                    AND mid_price > 10000 AND mid_price < 50000
+                ),
+                medians AS (
+                    SELECT
+                        time_bucket(INTERVAL '{interval}', shifted_ts) as bucket,
+                        MEDIAN(mid_price) as median_price
+                    FROM shifted
+                    GROUP BY time_bucket(INTERVAL '{interval}', shifted_ts)
+                ),
+                filtered AS (
+                    SELECT s.*, med.median_price
+                    FROM shifted s
+                    JOIN medians med ON time_bucket(INTERVAL '{interval}', s.shifted_ts) = med.bucket
+                    WHERE ABS(s.mid_price - med.median_price) / med.median_price < 0.005
                 ),
                 bars AS (
                     SELECT
@@ -352,7 +376,7 @@ def aggregate_mbp_to_ohlcv(storage):
                         AVG(dom_imbalance) as dom_imbalance,
                         AVG(total_bid_depth) as total_bid_depth,
                         AVG(total_ask_depth) as total_ask_depth
-                    FROM shifted
+                    FROM filtered
                     GROUP BY time_bucket(INTERVAL '{interval}', shifted_ts)
                     HAVING FIRST(mid_price) IS NOT NULL
                 )
@@ -368,9 +392,31 @@ def aggregate_mbp_to_ohlcv(storage):
             """)
         else:
             # Standard time bucketing for intraday timeframes
+            # Two-pass approach: first compute median, then filter outliers and aggregate
             storage.conn.execute(f"""
                 INSERT OR REPLACE INTO ohlcv_ticks
-                WITH bars AS (
+                WITH medians AS (
+                    -- First pass: compute median for each time bucket
+                    SELECT
+                        time_bucket(INTERVAL '{interval}', timestamp) as bucket,
+                        MEDIAN(mid_price) as median_price
+                    FROM mbp_ticks
+                    WHERE symbol = 'MNQ'
+                    AND spread / mid_price < 0.005
+                    AND mid_price > 10000 AND mid_price < 50000
+                    GROUP BY time_bucket(INTERVAL '{interval}', timestamp)
+                ),
+                filtered AS (
+                    -- Second pass: filter quotes within 0.5% of median (removes back-month)
+                    SELECT m.*, med.median_price
+                    FROM mbp_ticks m
+                    JOIN medians med ON time_bucket(INTERVAL '{interval}', m.timestamp) = med.bucket
+                    WHERE m.symbol = 'MNQ'
+                    AND m.spread / m.mid_price < 0.005
+                    AND m.mid_price > 10000 AND m.mid_price < 50000
+                    AND ABS(m.mid_price - med.median_price) / med.median_price < 0.005
+                ),
+                bars AS (
                     SELECT
                         time_bucket(INTERVAL '{interval}', timestamp) as timestamp,
                         'MNQ' as symbol,
@@ -384,8 +430,7 @@ def aggregate_mbp_to_ohlcv(storage):
                         AVG(dom_imbalance) as dom_imbalance,
                         AVG(total_bid_depth) as total_bid_depth,
                         AVG(total_ask_depth) as total_ask_depth
-                    FROM mbp_ticks
-                    WHERE symbol = 'MNQ'
+                    FROM filtered
                     GROUP BY time_bucket(INTERVAL '{interval}', timestamp)
                     HAVING FIRST(mid_price) IS NOT NULL
                 )

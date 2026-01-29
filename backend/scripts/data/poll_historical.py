@@ -95,10 +95,20 @@ def process_mbp_data(df: pl.DataFrame) -> pl.DataFrame:
         pl.col("ask_sz_00").cast(pl.Int64),
     ])
 
-    # Calculate mid price
+    # Calculate mid price and spread
     df = df.with_columns([
         ((pl.col("bid_px_00") + pl.col("ask_px_00")) / 2).alias("mid_price"),
+        (pl.col("ask_px_00") - pl.col("bid_px_00")).alias("spread"),
     ])
+
+    # Filter bad quotes: wide spreads or prices out of range
+    df = df.filter(
+        (pl.col("spread") / pl.col("mid_price") < 0.005) &  # Spread < 0.5%
+        (pl.col("mid_price") > 10000) &
+        (pl.col("mid_price") < 50000) &
+        (pl.col("bid_px_00") > 0) &
+        (pl.col("ask_px_00") > 0)
+    )
 
     # Calculate delta from size changes
     df = df.with_columns([
@@ -142,7 +152,23 @@ def aggregate_and_insert(df: pl.DataFrame) -> int:
 
     with DuckDBStorage() as storage:
         for tf, duration in timeframes.items():
-            df_agg = df.group_by_dynamic(
+            # Two-pass approach: compute median per bar, filter outliers, then aggregate
+            # First, compute median for each time bucket
+            df_with_bucket = df.with_columns([
+                pl.col("timestamp").dt.truncate(duration).alias("bucket")
+            ])
+
+            medians = df_with_bucket.group_by("bucket").agg([
+                pl.col("mid_price").median().alias("median_price")
+            ])
+
+            # Join and filter quotes within 0.5% of median (removes back-month quotes)
+            df_filtered = df_with_bucket.join(medians, on="bucket", how="left").filter(
+                (pl.col("mid_price") - pl.col("median_price")).abs() / pl.col("median_price") < 0.005
+            )
+
+            # Now aggregate the filtered data
+            df_agg = df_filtered.group_by_dynamic(
                 "timestamp", every=duration, closed="left", label="left"
             ).agg([
                 pl.col("mid_price").first().alias("open"),
@@ -159,6 +185,11 @@ def aggregate_and_insert(df: pl.DataFrame) -> int:
                 pl.lit(tf).alias("timeframe"),
                 pl.lit(0).cast(pl.Int64).alias("cvd"),
             ])
+
+            # Post-aggregation filter: remove bars with >2% range
+            df_agg = df_agg.filter(
+                ((pl.col("high") - pl.col("low")) / pl.col("close") < 0.015)
+            )
 
             # Reorder columns
             df_insert = df_agg.select([

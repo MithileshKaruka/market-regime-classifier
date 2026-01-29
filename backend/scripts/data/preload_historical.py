@@ -373,6 +373,11 @@ def download_and_load_mbp_chunked(api_key: str, start_date: str, end_date: str, 
                         pl.lit(0).cast(pl.Int64).alias("cvd"),  # Will compute rolling later
                     ])
 
+                    # Post-aggregation filter: remove bars with >2% range
+                    df_agg = df_agg.filter(
+                        ((pl.col("high") - pl.col("low")) / pl.col("close") < 0.015)
+                    )
+
                     # Reorder columns to match table schema
                     df_insert = df_agg.select([
                         "timestamp", "symbol", "timeframe", "open", "high", "low", "close",
@@ -422,6 +427,15 @@ def _process_mbp_chunk(df: "pl.DataFrame") -> "pl.DataFrame":
         ((pl.col("bid_px_00") + pl.col("ask_px_00")) / 2).alias("mid_price"),
         (pl.col("ask_px_00") - pl.col("bid_px_00")).alias("spread"),
     ])
+
+    # Filter out bad quotes: wide spreads (>0.5% of price) or prices outside reasonable range
+    df = df.filter(
+        (pl.col("spread") / pl.col("mid_price") < 0.005) &  # Spread < 0.5%
+        (pl.col("mid_price") > 10000) &  # Min MNQ price
+        (pl.col("mid_price") < 50000) &  # Max MNQ price
+        (pl.col("bid_px_00") > 0) &
+        (pl.col("ask_px_00") > 0)
+    )
 
     # Calculate delta from size changes
     df = df.with_columns([

@@ -1,5 +1,6 @@
 """FastAPI application for Market Regime Classifier"""
 import logging
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,14 +36,25 @@ app = FastAPI(
 )
 
 # CORS middleware for React frontend
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
+# In production, allow all origins or set CORS_ORIGINS env var
+cors_origins_env = os.getenv("CORS_ORIGINS", "")
+if cors_origins_env == "*" or os.getenv("ENVIRONMENT") == "production":
+    cors_origins = ["*"]
+elif cors_origins_env:
+    cors_origins = [origin.strip() for origin in cors_origins_env.split(",")]
+else:
+    cors_origins = [
         "http://localhost:5173",  # Vite default (localhost)
         "http://127.0.0.1:5173",  # Vite default (127.0.0.1)
         "http://localhost:3000",  # Alternative
         "http://127.0.0.1:3000",  # Alternative
-    ],
+        "http://localhost",       # Docker frontend
+        "http://127.0.0.1",       # Docker frontend
+    ]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
