@@ -594,7 +594,7 @@ Examples:
                 api_key,
                 date_ranges['mbp']['start'],
                 date_ranges['mbp']['end'],
-                days_per_chunk=1  # 1 day at a time for limited RAM
+                hours_per_chunk=4  # 4-hour chunks for 8GB RAM
             )
 
         # Print summary
