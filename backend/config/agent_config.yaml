@@ -74,7 +74,7 @@ instrument:
 streaming:
   dataset: GLBX.MDP3          # Databento dataset
   default_symbols:
-    - MNQ
+    - MNQ.FUT  # Parent symbol format for continuous contracts
   default_timeframes:
     - 5M
     - 15M
