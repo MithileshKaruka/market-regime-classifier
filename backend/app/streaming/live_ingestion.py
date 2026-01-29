@@ -364,14 +364,22 @@ class LiveDataIngestion:
         """Get the current compressed DBN archive file path (rotates daily)
 
         Uses .dbn.zst (zstd compression) for minimal disk footprint.
+        If file exists, adds a timestamp suffix to create a new file.
         """
         today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
         if self._current_dbn_date != today:
             self._current_dbn_date = today
-            # Always use .dbn.zst for compression
-            self._current_dbn_path = self.archive_dir / f"mbp1_{today}.dbn.zst"
-            logger.info(f"DBN archive file (zstd compressed): {self._current_dbn_path}")
+            base_path = self.archive_dir / f"mbp1_{today}.dbn.zst"
+
+            # If file exists, add timestamp suffix to avoid collision
+            if base_path.exists():
+                timestamp = datetime.now(timezone.utc).strftime('%H%M%S')
+                self._current_dbn_path = self.archive_dir / f"mbp1_{today}_{timestamp}.dbn.zst"
+                logger.info(f"Existing archive found, using: {self._current_dbn_path}")
+            else:
+                self._current_dbn_path = base_path
+                logger.info(f"DBN archive file (zstd compressed): {self._current_dbn_path}")
 
         return self._current_dbn_path
 
