@@ -106,6 +106,9 @@ class LiveDataIngestion:
         # Track previous quote for delta calculation
         self.prev_quotes: Dict[str, Dict[str, Any]] = {s: {} for s in self.symbols}
 
+        # Instrument ID to symbol mapping (populated from SymbolMappingMsg)
+        self.instrument_id_to_symbol: Dict[int, str] = {}
+
         logger.info(f"LiveDataIngestion initialized for {self.symbols}")
         logger.info(f"  Timeframes: {self.timeframes}")
         logger.info(f"  Schema: mbp-1")
@@ -423,10 +426,24 @@ class LiveDataIngestion:
             async for record in client:
                 record_type = type(record).__name__
 
-                if record_type == "MBP1Msg":
+                if record_type == "SymbolMappingMsg":
+                    # Map instrument_id to our config symbol (stype_in_symbol)
+                    instrument_id = record.instrument_id
+                    # stype_in_symbol is our parent symbol (e.g., "MNQ.FUT")
+                    symbol = record.stype_in_symbol
+                    self.instrument_id_to_symbol[instrument_id] = symbol
+                    logger.info(f"Symbol mapping: instrument_id={instrument_id} -> {symbol}")
+
+                elif record_type == "MBP1Msg":
                     # Quote update - process and update bars
                     quote = self.extract_quote(record)
-                    await self.process_mbp_tick(quote, symbol="MNQ")
+                    # Look up symbol from instrument_id
+                    instrument_id = record.instrument_id
+                    symbol = self.instrument_id_to_symbol.get(instrument_id)
+                    if symbol is None:
+                        logger.warning(f"Unknown instrument_id: {instrument_id}, skipping tick")
+                        continue
+                    await self.process_mbp_tick(quote, symbol=symbol)
                     tick_count += 1
 
                 # Check for daily file rotation
