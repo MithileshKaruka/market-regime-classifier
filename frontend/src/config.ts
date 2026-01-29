@@ -4,8 +4,20 @@
 // ============================================================================
 // API Configuration
 // ============================================================================
+// Use relative URLs in production (empty string) to go through nginx proxy
+// This avoids CORS issues and corporate proxy blocks on non-standard ports
+const getApiBaseUrl = () => {
+  const envUrl = import.meta.env.VITE_API_URL
+  // Empty string or "/" means use relative URLs (same origin)
+  if (envUrl === '' || envUrl === '/') return ''
+  // Explicit URL provided
+  if (envUrl) return envUrl
+  // Default for local development
+  return 'http://127.0.0.1:8000'
+}
+
 export const API_CONFIG = {
-  baseUrl: import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000',
+  baseUrl: getApiBaseUrl(),
   endpoints: {
     chart: '/api/v2/chart',
     supportResistance: '/api/regime/support-resistance',

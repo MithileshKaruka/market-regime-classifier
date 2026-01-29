@@ -26,8 +26,8 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-      args:
-        - VITE_API_URL=${VITE_API_URL:-http://localhost:8000}
+      # No VITE_API_URL needed - defaults to empty for relative URLs
+      # All API requests go through nginx proxy to backend:8000
     ports:
       - "80:80"
     depends_on:
