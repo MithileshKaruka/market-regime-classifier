@@ -267,34 +267,163 @@ def load_ohlcv_file(file_path: Path):
         storage.conn.commit()
 
 
-def load_mbp_file(file_path: Path):
-    """Load MBP file into database"""
+def load_mbp_file(file_path: Path, chunk_size: int = 1_000_000):
+    """Load MBP file into database - skipped, use download_and_load_mbp_chunked instead"""
+    print(f"\nMBP file too large for single load: {file_path.stat().st_size / 1024**3:.2f} GB")
+    print("  Use --mbp-days 7 to download smaller chunks")
+    print("  Or run download_and_load_mbp_chunked() for streaming load")
+
+
+def download_and_load_mbp_chunked(api_key: str, start_date: str, end_date: str, days_per_chunk: int = 3):
+    """Download and load MBP data in small date chunks to manage memory
+
+    Args:
+        api_key: Databento API key
+        start_date: Start date YYYY-MM-DD
+        end_date: End date YYYY-MM-DD
+        days_per_chunk: Days per download chunk (default 3)
+    """
+    import polars as pl
     from scripts.data.load_historical_data import (
-        load_mbp1_from_dbn,
-        process_mbp1_to_ticks,
         ensure_mbp_table,
         ensure_ohlcv_table,
-        insert_mbp_ticks,
         aggregate_mbp_to_ohlcv,
     )
 
-    print(f"\nLoading MBP-1 into database...")
+    print(f"\nDownloading and loading MBP-1 in {days_per_chunk}-day chunks...")
+    print(f"  Range: {start_date} to {end_date}")
+
+    start = datetime.strptime(start_date, '%Y-%m-%d').date()
+    end = datetime.strptime(end_date, '%Y-%m-%d').date()
 
     with DuckDBStorage() as storage:
         ensure_mbp_table(storage)
         ensure_ohlcv_table(storage)
 
-        # Load and process
-        df_mbp = load_mbp1_from_dbn(file_path)
-        df_ticks = process_mbp1_to_ticks(df_mbp)
-
-        print(f"Inserting {len(df_ticks):,} MBP ticks...")
-        insert_mbp_ticks(storage, df_ticks)
+        # Clear existing MBP data
+        storage.conn.execute("DELETE FROM mbp_ticks")
         storage.conn.commit()
+
+        client = db.Historical(api_key)
+        total_inserted = 0
+        chunk_num = 0
+        current = start
+
+        while current < end:
+            chunk_num += 1
+            chunk_end = min(current + timedelta(days=days_per_chunk), end)
+
+            print(f"\n  Chunk {chunk_num}: {current} to {chunk_end}...")
+
+            try:
+                # Download chunk directly to dataframe (no file)
+                data = client.timeseries.get_range(
+                    dataset=DATASET,
+                    symbols=[SYMBOL],
+                    stype_in=STYPE_IN,
+                    schema="mbp-1",
+                    start=current.strftime('%Y-%m-%d'),
+                    end=chunk_end.strftime('%Y-%m-%d'),
+                )
+
+                df = data.to_df()
+                if len(df) == 0:
+                    print(f"    No data for this period")
+                    current = chunk_end
+                    continue
+
+                # Reset index
+                if hasattr(df, 'index'):
+                    df = df.reset_index()
+                    if 'index' in df.columns:
+                        df = df.rename(columns={'index': 'ts_event'})
+
+                print(f"    Downloaded: {len(df):,} records")
+
+                # Convert and process
+                df_pl = pl.from_pandas(df)
+                df_ticks = _process_mbp_chunk(df_pl)
+
+                if len(df_ticks) > 0:
+                    storage.conn.execute("INSERT INTO mbp_ticks SELECT * FROM df_ticks")
+                    storage.conn.commit()
+                    total_inserted += len(df_ticks)
+
+                print(f"    Inserted: {len(df_ticks):,} ticks (total: {total_inserted:,})")
+
+                # Free memory
+                del df, df_pl, df_ticks, data
+
+            except Exception as e:
+                print(f"    Error: {e}")
+
+            current = chunk_end
+
+        print(f"\n  Total inserted: {total_inserted:,} ticks")
 
         # Aggregate to OHLCV
-        aggregate_mbp_to_ohlcv(storage)
-        storage.conn.commit()
+        if total_inserted > 0:
+            print("  Aggregating to OHLCV bars...")
+            aggregate_mbp_to_ohlcv(storage)
+            storage.conn.commit()
+
+        print("  Done!")
+
+
+def _process_mbp_chunk(df: "pl.DataFrame") -> "pl.DataFrame":
+    """Process a chunk of MBP data to ticks format"""
+    import polars as pl
+
+    symbol = "MNQ"
+
+    # Calculate mid price and spread
+    df = df.with_columns([
+        ((pl.col("bid_px_00") + pl.col("ask_px_00")) / 2).alias("mid_price"),
+        (pl.col("ask_px_00") - pl.col("bid_px_00")).alias("spread"),
+    ])
+
+    # Calculate delta from size changes
+    df = df.with_columns([
+        (pl.col("bid_sz_00") - pl.col("bid_sz_00").shift(1)).fill_null(0).alias("bid_change"),
+        (pl.col("ask_sz_00") - pl.col("ask_sz_00").shift(1)).fill_null(0).alias("ask_change"),
+    ])
+
+    # Delta: negative ask change = buy, negative bid change = sell
+    df = df.with_columns([
+        (
+            pl.when(pl.col("ask_change") < 0).then(-pl.col("ask_change")).otherwise(0) -
+            pl.when(pl.col("bid_change") < 0).then(-pl.col("bid_change")).otherwise(0)
+        ).cast(pl.Int64).alias("delta")
+    ])
+
+    # Calculate DOM imbalance
+    df = df.with_columns([
+        (pl.col("bid_sz_00") / (pl.col("bid_sz_00") + pl.col("ask_sz_00"))).alias("dom_imbalance")
+    ])
+
+    # CVD will be recalculated during aggregation
+    df = df.with_columns([
+        pl.lit(0).cast(pl.Int64).alias("cvd")
+    ])
+
+    # Select final columns
+    df_ticks = df.select([
+        pl.col("ts_event").alias("timestamp"),
+        pl.lit(symbol).alias("symbol"),
+        pl.col("mid_price"),
+        pl.col("bid_px_00").alias("bid_price"),
+        pl.col("ask_px_00").alias("ask_price"),
+        pl.col("spread"),
+        pl.col("bid_sz_00").alias("bid_size"),
+        pl.col("ask_sz_00").alias("ask_size"),
+        pl.col("bid_sz_00").alias("total_bid_depth"),
+        pl.col("ask_sz_00").alias("total_ask_depth"),
+        pl.col("dom_imbalance"),
+        pl.col("delta"),
+        pl.col("cvd"),
+    ])
+
+    return df_ticks
 
 
 def print_summary():
@@ -418,19 +547,14 @@ Examples:
                     ohlcv_path.unlink()
                     print(f"  Cleaned up: {ohlcv_path.name}")
 
-        # Download and load MBP-1
+        # Download and load MBP-1 (chunked to manage memory)
         if not args.ohlcv_only:
-            mbp_path = download_mbp(
+            download_and_load_mbp_chunked(
                 api_key,
                 date_ranges['mbp']['start'],
                 date_ranges['mbp']['end'],
-                output_dir
+                days_per_chunk=3  # 3 days at a time to avoid OOM
             )
-            if mbp_path:
-                load_mbp_file(mbp_path)
-                if not args.keep_files:
-                    mbp_path.unlink()
-                    print(f"  Cleaned up: {mbp_path.name}")
 
         # Print summary
         print_summary()
