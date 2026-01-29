@@ -231,6 +231,12 @@ class LiveDataIngestion:
         if spread / mid_price > 0.005 or mid_price < 10000 or mid_price > 50000:
             return bar  # Keep existing bar unchanged
 
+        # Filter spike quotes: reject if price moves >1% from current bar's close
+        if bar is not None and bar.get('close'):
+            price_change_pct = abs(mid_price - bar['close']) / bar['close']
+            if price_change_pct > 0.01:  # >1% move in single tick is suspicious
+                return bar  # Keep existing bar unchanged
+
         # Calculate DOM imbalance
         total_bid = quote.get('bid_sz_00', 0)
         total_ask = quote.get('ask_sz_00', 0)
@@ -356,10 +362,12 @@ class LiveDataIngestion:
             )
 
             # Update regime cache
+            # Handle both enum and string return types from classifier
+            regime_str = regime_type.value if hasattr(regime_type, 'value') else str(regime_type)
             self.cache.update_regime(timeframe, symbol, {
                 'timeframe': timeframe,
                 'symbol': symbol,
-                'regime': regime_type.value,
+                'regime': regime_str,
                 'confidence': confidence,
                 'key_signal': key_signal,
                 'dom_imbalance': bar['dom_imbalance'],
