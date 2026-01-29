@@ -9,7 +9,7 @@ Raw MBP-1 data is archived to DBN files for backtesting.
 import asyncio
 import logging
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Callable
 import databento as db
@@ -350,7 +350,7 @@ class LiveDataIngestion:
 
         Uses .dbn.zst (zstd compression) for minimal disk footprint.
         """
-        today = datetime.utcnow().strftime('%Y-%m-%d')
+        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
         if self._current_dbn_date != today:
             self._current_dbn_date = today
@@ -395,7 +395,7 @@ class LiveDataIngestion:
             logger.info("Subscribed to MBP-1")
 
             tick_count = 0
-            last_date = datetime.utcnow().strftime('%Y-%m-%d')
+            last_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
             async for record in client:
                 record_type = type(record).__name__
@@ -407,7 +407,7 @@ class LiveDataIngestion:
                     tick_count += 1
 
                 # Check for daily file rotation
-                current_date = datetime.utcnow().strftime('%Y-%m-%d')
+                current_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
                 if current_date != last_date:
                     # Rotate to new daily DBN file
                     new_dbn_path = self.get_dbn_path()
@@ -425,7 +425,8 @@ class LiveDataIngestion:
             logger.error(f"Streaming error: {e}", exc_info=True)
             raise
         finally:
-            client.close()
+            if hasattr(client, 'stop'):
+                client.stop()
             logger.info("Stream closed")
 
 

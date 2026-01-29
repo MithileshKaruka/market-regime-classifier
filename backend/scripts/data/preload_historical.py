@@ -279,31 +279,31 @@ def load_mbp_file(file_path: Path, chunk_size: int = 1_000_000):
     print("  Or run download_and_load_mbp_chunked() for streaming load")
 
 
-def download_and_load_mbp_chunked(api_key: str, start_date: str, end_date: str, days_per_chunk: int = 1):
+def download_and_load_mbp_chunked(api_key: str, start_date: str, end_date: str, hours_per_chunk: int = 4):
     """Download MBP data and aggregate directly to OHLCV bars (memory efficient)
 
     Args:
         api_key: Databento API key
         start_date: Start date YYYY-MM-DD
         end_date: End date YYYY-MM-DD
-        days_per_chunk: Days per download chunk (default 1)
+        hours_per_chunk: Hours per download chunk (default 4)
     """
     import polars as pl
     from scripts.data.load_historical_data import ensure_ohlcv_table
+    import gc
 
     print(f"\nDownloading MBP-1 and aggregating to OHLCV bars...")
     print(f"  Range: {start_date} to {end_date}")
+    print(f"  Chunk size: {hours_per_chunk} hours")
     print(f"  (Aggregating directly - not storing raw ticks)")
 
-    start = datetime.strptime(start_date, '%Y-%m-%d').date()
-    end = datetime.strptime(end_date, '%Y-%m-%d').date()
+    start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+    end_dt = datetime.strptime(end_date, '%Y-%m-%d')
 
     timeframes = {
         "5M": "5m",
         "15M": "15m",
         "1H": "1h",
-        "4H": "4h",
-        "1D": "1d",
     }
 
     with DuckDBStorage() as storage:
@@ -312,13 +312,13 @@ def download_and_load_mbp_chunked(api_key: str, start_date: str, end_date: str, 
         client = db.Historical(api_key)
         total_bars = 0
         chunk_num = 0
-        current = start
+        current = start_dt
 
-        while current < end:
+        while current < end_dt:
             chunk_num += 1
-            chunk_end = min(current + timedelta(days=days_per_chunk), end)
+            chunk_end = min(current + timedelta(hours=hours_per_chunk), end_dt)
 
-            print(f"\n  Chunk {chunk_num}: {current} to {chunk_end}...")
+            print(f"\n  Chunk {chunk_num}: {current.strftime('%Y-%m-%d %H:%M')} to {chunk_end.strftime('%Y-%m-%d %H:%M')}...")
 
             try:
                 # Download chunk directly to dataframe (no file)
@@ -327,8 +327,8 @@ def download_and_load_mbp_chunked(api_key: str, start_date: str, end_date: str, 
                     symbols=[SYMBOL],
                     stype_in=STYPE_IN,
                     schema="mbp-1",
-                    start=current.strftime('%Y-%m-%d'),
-                    end=chunk_end.strftime('%Y-%m-%d'),
+                    start=current.strftime('%Y-%m-%dT%H:%M:%S'),
+                    end=chunk_end.strftime('%Y-%m-%dT%H:%M:%S'),
                 )
 
                 df = data.to_df()
@@ -388,8 +388,9 @@ def download_and_load_mbp_chunked(api_key: str, start_date: str, end_date: str, 
                 total_bars += chunk_bars
                 print(f"    Aggregated: {chunk_bars} bars (total: {total_bars})")
 
-                # Free memory
+                # Free memory aggressively
                 del df_processed
+                gc.collect()
 
             except Exception as e:
                 print(f"    Error: {e}")
@@ -397,8 +398,10 @@ def download_and_load_mbp_chunked(api_key: str, start_date: str, end_date: str, 
                 traceback.print_exc()
 
             current = chunk_end
+            gc.collect()
 
         print(f"\n  Total bars created: {total_bars}")
+        print("  Note: 4H and 1D bars need post-processing for cross-day CVD")
         print("  Done!")
 
 
