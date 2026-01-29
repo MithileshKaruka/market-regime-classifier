@@ -39,6 +39,23 @@ services:
       timeout: 10s
       retries: 3
 
+  live-ingestion:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: python -m app.streaming.live_ingestion
+    volumes:
+      - backend-data:/app/data
+    env_file:
+      - ./backend/.env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      - ENVIRONMENT=production
+    depends_on:
+      - backend
+    restart: unless-stopped
+
 volumes:
   backend-data:
     driver: local

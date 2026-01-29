@@ -352,10 +352,26 @@ def download_and_load_mbp_chunked(api_key: str, start_date: str, end_date: str, 
                 # Free original dataframes
                 del df, df_pl, data
 
-                # Aggregate directly to each timeframe
+                # Aggregate directly to each timeframe using median-based filtering
+                # This removes back-month contract quotes that cause long wicks
                 chunk_bars = 0
                 for tf, duration in timeframes.items():
-                    df_agg = df_processed.group_by_dynamic(
+                    # Two-pass approach: compute median per bar, filter outliers, then aggregate
+                    df_with_bucket = df_processed.with_columns([
+                        pl.col("timestamp").dt.truncate(duration).alias("bucket")
+                    ])
+
+                    medians = df_with_bucket.group_by("bucket").agg([
+                        pl.col("mid_price").median().alias("median_price")
+                    ])
+
+                    # Join and filter quotes within 0.5% of median (removes back-month quotes)
+                    df_filtered = df_with_bucket.join(medians, on="bucket", how="left").filter(
+                        (pl.col("mid_price") - pl.col("median_price")).abs() / pl.col("median_price") < 0.005
+                    )
+
+                    # Now aggregate the filtered data
+                    df_agg = df_filtered.group_by_dynamic(
                         "timestamp", every=duration, closed="left", label="left"
                     ).agg([
                         pl.col("mid_price").first().alias("open"),
@@ -373,9 +389,9 @@ def download_and_load_mbp_chunked(api_key: str, start_date: str, end_date: str, 
                         pl.lit(0).cast(pl.Int64).alias("cvd"),  # Will compute rolling later
                     ])
 
-                    # Post-aggregation filter: remove bars with >2% range
+                    # Post-aggregation filter: remove bars with >3% range (relaxed to allow high volatility)
                     df_agg = df_agg.filter(
-                        ((pl.col("high") - pl.col("low")) / pl.col("close") < 0.015)
+                        ((pl.col("high") - pl.col("low")) / pl.col("close") < 0.03)
                     )
 
                     # Reorder columns to match table schema

@@ -5,8 +5,9 @@ streaming:
   dataset: "GLBX.MDP3"
 
   # Symbols to stream (parent symbols for continuous contracts)
+  # Format must be ROOT.FUT for parent symbol type
   symbols:
-    - "MNQ"  # Micro E-mini Nasdaq-100
+    - "MNQ.FUT"  # Micro E-mini Nasdaq-100 futures
 
   # Schemas to subscribe
   schemas:
