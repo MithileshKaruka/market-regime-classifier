@@ -205,7 +205,6 @@ def evaluate_bias(state: AgentState) -> AgentState:
         obi_ratio=ldr_metrics.ldr if ldr_metrics else None,
         ldr=ldr_metrics.ldr if ldr_metrics else None,
         absorption_signals=abs_dicts,
-        lsf_signals=lsf_dicts,
         cvd=cvd_value,
     )
 
