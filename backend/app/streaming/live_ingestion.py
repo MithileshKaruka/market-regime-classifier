@@ -431,14 +431,23 @@ class LiveDataIngestion:
                 record_type = type(record).__name__
 
                 if record_type == "SymbolMappingMsg":
-                    # Map instrument_id to normalized symbol
+                    # Map instrument_id to config symbol
                     instrument_id = record.instrument_id
-                    # stype_in_symbol is parent symbol (e.g., "MNQ.FUT") - normalize to "MNQ"
                     raw_symbol = record.stype_in_symbol
-                    # Normalize: "MNQ.FUT" -> "MNQ", "ES.FUT" -> "ES", etc.
-                    symbol = raw_symbol.split('.')[0] if '.' in raw_symbol else raw_symbol
-                    self.instrument_id_to_symbol[instrument_id] = symbol
-                    logger.info(f"Symbol mapping: instrument_id={instrument_id} -> {raw_symbol} (normalized: {symbol})")
+                    # Databento may return "MNQ" but our config uses "MNQ.FUT"
+                    # Find the matching config symbol
+                    config_symbol = None
+                    for s in self.symbols:
+                        # Match "MNQ" to "MNQ.FUT" or exact match
+                        root = s.split('.')[0] if '.' in s else s
+                        if raw_symbol == s or raw_symbol == root:
+                            config_symbol = s
+                            break
+                    if config_symbol:
+                        self.instrument_id_to_symbol[instrument_id] = config_symbol
+                        logger.info(f"Symbol mapping: instrument_id={instrument_id} -> {raw_symbol} (config: {config_symbol})")
+                    else:
+                        logger.warning(f"Unknown symbol from Databento: {raw_symbol}, instrument_id={instrument_id}")
 
                 elif record_type == "MBP1Msg":
                     # Quote update - process and update bars
