@@ -306,6 +306,10 @@ class LiveDataIngestion:
                     current_bar = self.update_bar_with_quote(current_bar, quote, delta, bar_ts)
                     self.current_bars[tf][symbol] = current_bar
 
+                # Skip if bar is None (invalid quote)
+                if current_bar is None:
+                    continue
+
                 # Update rolling CVD on current bar (historical + current bar's delta)
                 current_bar['cvd'] = sum(self.delta_buffers[tf][symbol]) + current_bar['instant_delta']
 
@@ -341,20 +345,20 @@ class LiveDataIngestion:
                 storage.insert_ohlcv_ticks(df, symbol=symbol, timeframe=timeframe)
 
             # Classify regime
-            regime = self.classifier.classify_single(
+            regime_type, confidence, key_signal = self.classifier.classify(
                 dom_imbalance=bar['dom_imbalance'],
-                delta=bar['instant_delta'],
+                cvd=bar['cvd'],
+                price=bar['close'],
                 vwap=bar['close'],  # Using close as VWAP proxy
-                price=bar['close']
             )
 
             # Update regime cache
             self.cache.update_regime(timeframe, symbol, {
                 'timeframe': timeframe,
                 'symbol': symbol,
-                'regime': regime['regime'],
-                'confidence': regime['confidence'],
-                'key_signal': regime['key_signal'],
+                'regime': regime_type.value,
+                'confidence': confidence,
+                'key_signal': key_signal,
                 'dom_imbalance': bar['dom_imbalance'],
                 'delta': bar['instant_delta'],
                 'timestamp': bar['timestamp']
