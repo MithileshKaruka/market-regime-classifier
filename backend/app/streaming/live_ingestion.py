@@ -326,10 +326,13 @@ class LiveDataIngestion:
     async def _store_completed_bar(self, timeframe: str, symbol: str, bar: dict):
         """Store a completed bar to the database"""
         try:
+            # Normalize symbol for storage (MNQ.FUT -> MNQ for consistency with historical)
+            db_symbol = symbol.split('.')[0] if '.' in symbol else symbol
+
             with DuckDBStorage(db_path=self.db_path) as storage:
                 df = pl.DataFrame([{
                     'timestamp': bar['timestamp'],
-                    'symbol': symbol,
+                    'symbol': db_symbol,
                     'timeframe': timeframe,
                     'open': bar['open'],
                     'high': bar['high'],
@@ -342,7 +345,7 @@ class LiveDataIngestion:
                     'total_ask_depth': bar['total_ask_depth'],
                     'cvd': bar['cvd'],
                 }])
-                storage.insert_ohlcv_ticks(df, symbol=symbol, timeframe=timeframe)
+                storage.insert_ohlcv_ticks(df, symbol=db_symbol, timeframe=timeframe)
 
             # Classify regime
             regime_type, confidence, key_signal = self.classifier.classify(
