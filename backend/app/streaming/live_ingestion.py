@@ -106,13 +106,45 @@ class LiveDataIngestion:
         # Track previous quote for delta calculation
         self.prev_quotes: Dict[str, Dict[str, Any]] = {s: {} for s in self.symbols}
 
+        # Track last completed bar's close for spike filtering across bar boundaries
+        self.last_bar_close: Dict[str, Dict[str, Optional[float]]] = {}
+        for tf in self.timeframes:
+            self.last_bar_close[tf] = {s: None for s in self.symbols}
+
         # Instrument ID to symbol mapping (populated from SymbolMappingMsg)
         self.instrument_id_to_symbol: Dict[int, str] = {}
+
+        # Initialize last_bar_close from database for spike filtering on first tick
+        self._init_last_bar_close_from_db()
 
         logger.info(f"LiveDataIngestion initialized for {self.symbols}")
         logger.info(f"  Timeframes: {self.timeframes}")
         logger.info(f"  Schema: mbp-1")
         logger.info(f"  DB path: {self.db_path}")
+
+    def _init_last_bar_close_from_db(self):
+        """Load last bar close prices from database for spike filtering
+
+        This ensures the first tick after startup has a reference price
+        to filter against, preventing spikes at service restart.
+        """
+        try:
+            with DuckDBStorage(db_path=self.db_path) as storage:
+                for tf in self.timeframes:
+                    for symbol in self.symbols:
+                        # Query for normalized symbol (MNQ, not MNQ.FUT)
+                        db_symbol = symbol.split('.')[0] if '.' in symbol else symbol
+                        query = f"""
+                            SELECT close FROM ohlcv_ticks
+                            WHERE symbol = '{db_symbol}' AND timeframe = '{tf}'
+                            ORDER BY timestamp DESC LIMIT 1
+                        """
+                        result = storage.conn.execute(query).fetchone()
+                        if result:
+                            self.last_bar_close[tf][symbol] = result[0]
+                            logger.info(f"Loaded last close for {tf}:{symbol} = {result[0]:.2f}")
+        except Exception as e:
+            logger.warning(f"Could not load last bar close from DB: {e}")
 
     async def _default_bar_update(self, timeframe: str, symbol: str, bar: dict):
         """Default callback: push bar update via WebSocket"""
@@ -212,10 +244,17 @@ class LiveDataIngestion:
 
         return delta
 
-    def update_bar_with_quote(self, bar: Optional[dict], quote: dict, delta: int, bar_timestamp: datetime) -> Optional[dict]:
+    def update_bar_with_quote(self, bar: Optional[dict], quote: dict, delta: int, bar_timestamp: datetime, last_close: Optional[float] = None) -> Optional[dict]:
         """Update an existing bar with a new MBP-1 quote
 
         Returns None if quote is invalid (bad spread, price out of range)
+
+        Args:
+            bar: Current bar to update (None if starting new bar)
+            quote: MBP-1 quote data
+            delta: Calculated delta from quote change
+            bar_timestamp: Timestamp for the bar
+            last_close: Previous bar's close price for spike filtering when starting new bar
         """
         bid_px = quote.get('bid_px_00', 0)
         ask_px = quote.get('ask_px_00', 0)
@@ -231,10 +270,18 @@ class LiveDataIngestion:
         if spread / mid_price > 0.005 or mid_price < 10000 or mid_price > 50000:
             return bar  # Keep existing bar unchanged
 
-        # Filter spike quotes: reject if price moves >1% from current bar's close
+        # Filter spike quotes: reject if price moves >1% from reference price
+        # Use current bar's close, or previous bar's close if starting new bar
+        reference_price = None
         if bar is not None and bar.get('close'):
-            price_change_pct = abs(mid_price - bar['close']) / bar['close']
+            reference_price = bar['close']
+        elif last_close is not None:
+            reference_price = last_close
+
+        if reference_price is not None:
+            price_change_pct = abs(mid_price - reference_price) / reference_price
             if price_change_pct > 0.01:  # >1% move in single tick is suspicious
+                logger.warning(f"Spike rejected: {mid_price:.2f} vs ref {reference_price:.2f} ({price_change_pct*100:.2f}%)")
                 return bar  # Keep existing bar unchanged
 
         # Calculate DOM imbalance
@@ -297,6 +344,9 @@ class LiveDataIngestion:
                         # Calculate rolling CVD from buffer
                         current_bar['cvd'] = sum(self.delta_buffers[tf][symbol])
 
+                        # Store last close for spike filtering on next bar
+                        self.last_bar_close[tf][symbol] = current_bar['close']
+
                         # Store completed bar
                         await self._store_completed_bar(tf, symbol, current_bar)
 
@@ -304,8 +354,9 @@ class LiveDataIngestion:
                         if self.on_bar_close:
                             await self.on_bar_close(tf, symbol, current_bar)
 
-                    # Start new bar
-                    current_bar = self.update_bar_with_quote(None, quote, delta, bar_ts)
+                    # Start new bar (pass last_close for spike filtering)
+                    last_close = self.last_bar_close[tf][symbol]
+                    current_bar = self.update_bar_with_quote(None, quote, delta, bar_ts, last_close=last_close)
                     self.current_bars[tf][symbol] = current_bar
                 else:
                     # Update existing bar
