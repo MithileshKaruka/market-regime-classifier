@@ -8,12 +8,35 @@ Raw MBP-1 data is archived to DBN files for backtesting.
 """
 import asyncio
 import logging
+import re
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Callable
 import databento as db
 import polars as pl
+
+
+def normalize_symbol(symbol: str) -> str:
+    """Normalize symbol to root form for database storage
+
+    Handles multiple formats:
+    - "MNQH26" -> "MNQ" (strips contract month code H/M/U/Z + 2 digits)
+    - "MNQ.FUT" -> "MNQ" (strips .FUT suffix)
+    - "MNQ" -> "MNQ" (unchanged)
+
+    Args:
+        symbol: Raw symbol from config or Databento
+
+    Returns:
+        Normalized root symbol (e.g., "MNQ")
+    """
+    if not symbol:
+        return symbol
+    # First strip any .suffix (e.g., .FUT, .c.0)
+    base = symbol.split('.')[0]
+    # Then strip contract month code (H/M/U/Z followed by 2 digits at end)
+    return re.sub(r'[HMUZ]\d{2}$', '', base)
 
 from app.features.order_flow import OrderFlowCalculator
 from app.classifiers.regime import RegimeClassifier
@@ -134,8 +157,8 @@ class LiveDataIngestion:
             with DuckDBStorage(db_path=self.db_path) as storage:
                 for tf in self.timeframes:
                     for symbol in self.symbols:
-                        # Query for normalized symbol (MNQ, not MNQ.FUT)
-                        db_symbol = symbol.split('.')[0] if '.' in symbol else symbol
+                        # Query for normalized symbol (MNQ, not MNQH26 or MNQ.FUT)
+                        db_symbol = normalize_symbol(symbol)
                         query = f"""
                             SELECT close FROM ohlcv_ticks
                             WHERE symbol = '{db_symbol}' AND timeframe = '{tf}'
@@ -385,8 +408,8 @@ class LiveDataIngestion:
     async def _store_completed_bar(self, timeframe: str, symbol: str, bar: dict):
         """Store a completed bar to the database"""
         try:
-            # Normalize symbol for storage (MNQ.FUT -> MNQ for consistency with historical)
-            db_symbol = symbol.split('.')[0] if '.' in symbol else symbol
+            # Normalize symbol for storage (MNQH26/MNQ.FUT -> MNQ for consistency with historical)
+            db_symbol = normalize_symbol(symbol)
 
             with DuckDBStorage(db_path=self.db_path) as storage:
                 df = pl.DataFrame([{
