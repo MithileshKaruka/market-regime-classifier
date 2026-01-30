@@ -4,10 +4,11 @@ streaming:
   # Dataset for CME futures
   dataset: "GLBX.MDP3"
 
-  # Symbols to stream (parent symbols for continuous contracts)
-  # Format must be ROOT.FUT for parent symbol type
+  # Symbols to stream
+  # Use specific contract month (MNQH26 = March 2026) to avoid multi-contract interference
+  # Update quarterly: H=Mar, M=Jun, U=Sep, Z=Dec
   symbols:
-    - "MNQ.FUT"  # Micro E-mini Nasdaq-100 futures
+    - "MNQH26"  # Micro E-mini Nasdaq-100 March 2026
 
   # Schemas to subscribe
   schemas:
@@ -15,7 +16,7 @@ streaming:
     # - "trades"  # Reserved for future: footprint charts
 
   # Symbol type for subscription
-  stype_in: "parent"  # Use parent symbols for continuous contracts
+  stype_in: "raw_symbol"  # Use specific contract symbol
 
   # Timeframes to aggregate
   timeframes:

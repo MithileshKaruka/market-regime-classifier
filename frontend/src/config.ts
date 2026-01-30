@@ -47,15 +47,17 @@ export const WEBSOCKET_CONFIG = {
 // ============================================================================
 export const SYMBOL_CONFIG = {
   displaySymbol: 'MNQ',
-  backendSymbol: 'MNQ.FUT',
+  backendSymbol: 'MNQH26',  // Specific contract - update quarterly: H=Mar, M=Jun, U=Sep, Z=Dec
 } as const
 
 export function toBackendSymbol(display: string): string {
-  return `${display}.FUT`
+  // For now, just use the configured backend symbol
+  return SYMBOL_CONFIG.backendSymbol
 }
 
 export function toDisplaySymbol(backend: string): string {
-  return backend.replace('.FUT', '')
+  // Strip contract suffix to get root symbol
+  return backend.replace(/[HMUZ]\d{2}$/, '')
 }
 
 // ============================================================================
