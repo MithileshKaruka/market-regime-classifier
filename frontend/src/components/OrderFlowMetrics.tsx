@@ -1,7 +1,10 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import './OrderFlowMetrics.css'
 import { API_CONFIG, COLORS, POLLING_INTERVALS, LABELS, SYMBOL_CONFIG } from '../config'
 import { useWebSocket } from '../hooks/useWebSocket'
+
+// Throttle interval for bar_update refreshes (ms)
+const UPDATE_THROTTLE_MS = 5000
 
 interface DOMSummary {
   timeframe: string
@@ -28,25 +31,47 @@ interface OrderFlowMetricsProps {
 export default function OrderFlowMetrics({ timeframe }: OrderFlowMetricsProps) {
   const [metrics, setMetrics] = useState<SimplifiedMetrics | null>(null)
   const [loading, setLoading] = useState(true)
+  const lastFetchTimeRef = useRef<number>(0)
 
   const fetchMetrics = useCallback(async () => {
+    lastFetchTimeRef.current = Date.now()
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
+
     try {
-      const response = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.metrics}`)
+      const response = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.metrics}`, {
+        signal: controller.signal
+      })
+      clearTimeout(timeoutId)
       const data = await response.json()
       setMetrics(data)
       setLoading(false)
     } catch (error) {
-      console.error('Error fetching metrics:', error)
+      clearTimeout(timeoutId)
+      if (error instanceof Error && error.name === 'AbortError') {
+        console.warn('Metrics fetch timed out')
+      } else {
+        console.error('Error fetching metrics:', error)
+      }
       // Use sample data if API is not available
       setMetrics(getSampleMetrics())
       setLoading(false)
     }
   }, [])
 
-  // Subscribe to WebSocket - refresh metrics on bar close
+  // Throttled fetch for bar_update events (don't flood API on every tick)
+  const throttledFetch = useCallback(() => {
+    const now = Date.now()
+    if (now - lastFetchTimeRef.current >= UPDATE_THROTTLE_MS) {
+      fetchMetrics()
+    }
+  }, [fetchMetrics])
+
+  // Subscribe to WebSocket - refresh metrics on bar update (throttled) and bar close
   useWebSocket({
     timeframe,
     symbol: SYMBOL_CONFIG.backendSymbol,
+    onBarUpdate: throttledFetch,
     onBarClose: fetchMetrics,
   })
 

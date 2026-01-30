@@ -44,13 +44,15 @@ const clearTimers = () => {
 export const useWebSocketStore = create<WebSocketStore>((set, get) => {
   const scheduleReconnect = () => {
     const { reconnectAttempts } = get()
-    if (reconnectAttempts >= WEBSOCKET_CONFIG.reconnectAttempts) {
-      set({ status: 'error', error: 'Max reconnection attempts reached' })
-      return
-    }
 
-    const delay = WEBSOCKET_CONFIG.reconnectDelayBase * Math.pow(2, reconnectAttempts)
+    // Calculate delay with exponential backoff, capped at 30 seconds
+    const delay = Math.min(
+      WEBSOCKET_CONFIG.reconnectDelayBase * Math.pow(2, reconnectAttempts),
+      30000
+    )
+
     set({ status: 'reconnecting', reconnectAttempts: reconnectAttempts + 1 })
+    console.log(`[WebSocket] Reconnecting in ${delay}ms (attempt ${reconnectAttempts + 1})`)
 
     reconnectTimeout = setTimeout(() => {
       get().connect()

@@ -389,6 +389,9 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
 
     setIsLoadingMore(true)
     isLoadingMoreRef.current = true
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
+
     try {
       const currentBars = loadedBarsRef.current
       // Offset is simply the number of bars already loaded
@@ -396,8 +399,10 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
       // Always fetch all indicators for consistency
       const allIndicators = ALL_INDICATOR_KEYS.join(',')
       const response = await fetch(
-        `${API_CONFIG.baseUrl}${API_CONFIG.endpoints.chart}/${timeframe}?limit=${CHART_CONFIG.loadMoreSize}&offset=${newOffset}&indicators=${allIndicators}`
+        `${API_CONFIG.baseUrl}${API_CONFIG.endpoints.chart}/${timeframe}?limit=${CHART_CONFIG.loadMoreSize}&offset=${newOffset}&indicators=${allIndicators}`,
+        { signal: controller.signal }
       )
+      clearTimeout(timeoutId)
 
       if (!response.ok) {
         throw new Error('Failed to fetch more data')
@@ -415,7 +420,12 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
         console.log(`[LazyLoad] Loaded ${newBars.length} more bars, total: ${mergedBars.length}/${totalBarsRef.current}`)
       }
     } catch (error) {
-      console.error('Error loading more data:', error)
+      clearTimeout(timeoutId)
+      if (error instanceof Error && error.name === 'AbortError') {
+        console.warn('Load more data fetch timed out')
+      } else {
+        console.error('Error loading more data:', error)
+      }
     } finally {
       setIsLoadingMore(false)
       isLoadingMoreRef.current = false
@@ -448,6 +458,9 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
       const isTimeframeChange = prevTimeframeRef.current !== timeframe
       prevTimeframeRef.current = timeframe
 
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 15000) // 15 second timeout for initial load
+
       try {
         setLoading(true)
 
@@ -463,10 +476,11 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
 
         // Fetch ALL data in PARALLEL to prevent visual flash when switching timeframes
         const [chartResponse, signalsResponse, srResponse] = await Promise.all([
-          fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.chart}/${timeframe}?limit=${CHART_CONFIG.initialLoad}&offset=0&indicators=${allIndicators}`),
-          fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.orderflowSignals}/${timeframe}?limit=${CHART_CONFIG.signalsLimit}`),
-          fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.supportResistance}/${timeframe}${priceRangeParam}`)
+          fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.chart}/${timeframe}?limit=${CHART_CONFIG.initialLoad}&offset=0&indicators=${allIndicators}`, { signal: controller.signal }),
+          fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.orderflowSignals}/${timeframe}?limit=${CHART_CONFIG.signalsLimit}`, { signal: controller.signal }),
+          fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.supportResistance}/${timeframe}${priceRangeParam}`, { signal: controller.signal })
         ])
+        clearTimeout(timeoutId)
 
         if (!chartResponse.ok) {
           throw new Error('Failed to fetch chart data')
@@ -590,7 +604,12 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
 
         setLoading(false)
       } catch (error) {
-        console.error('Error fetching chart data:', error)
+        clearTimeout(timeoutId)
+        if (error instanceof Error && error.name === 'AbortError') {
+          console.warn('Chart data fetch timed out')
+        } else {
+          console.error('Error fetching chart data:', error)
+        }
         setLoading(false)
       }
     }

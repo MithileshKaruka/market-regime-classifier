@@ -251,25 +251,26 @@ async def get_simplified_metrics():
                     timestamp=row["timestamp"],
                 ))
 
-        # Calculate daily VWAP from recent bars
+        # Calculate daily VWAP from intraday bars (15M for precision)
+        # Use today's bars only for true daily VWAP
         vwap_df = storage.conn.execute("""
             SELECT
                 SUM((high + low + close) / 3 * volume) / SUM(volume) as vwap,
-                (SELECT close FROM ohlcv_ticks WHERE symbol = 'MNQ' AND timeframe = '1D' ORDER BY timestamp DESC LIMIT 1) as current_price
+                (SELECT close FROM ohlcv_ticks WHERE symbol = 'MNQ' ORDER BY timestamp DESC LIMIT 1) as current_price
             FROM ohlcv_ticks
-            WHERE symbol = 'MNQ' AND timeframe = '1D'
-            AND timestamp >= (SELECT MAX(timestamp) - INTERVAL '1 day' FROM ohlcv_ticks WHERE symbol = 'MNQ' AND timeframe = '1D')
+            WHERE symbol = 'MNQ' AND timeframe = '15M'
+            AND DATE(timestamp) = (SELECT DATE(MAX(timestamp)) FROM ohlcv_ticks WHERE symbol = 'MNQ' AND timeframe = '15M')
         """).pl()
 
         if len(vwap_df) == 0 or vwap_df["vwap"][0] is None:
-            # Fall back to 1H data if no daily
+            # Fall back to 1H data if no 15M
             vwap_df = storage.conn.execute("""
                 SELECT
                     SUM((high + low + close) / 3 * volume) / SUM(volume) as vwap,
-                    (SELECT close FROM ohlcv_ticks WHERE symbol = 'MNQ' AND timeframe = '1H' ORDER BY timestamp DESC LIMIT 1) as current_price
+                    (SELECT close FROM ohlcv_ticks WHERE symbol = 'MNQ' ORDER BY timestamp DESC LIMIT 1) as current_price
                 FROM ohlcv_ticks
                 WHERE symbol = 'MNQ' AND timeframe = '1H'
-                AND timestamp >= (SELECT MAX(timestamp) - INTERVAL '1 day' FROM ohlcv_ticks WHERE symbol = 'MNQ' AND timeframe = '1H')
+                AND DATE(timestamp) = (SELECT DATE(MAX(timestamp)) FROM ohlcv_ticks WHERE symbol = 'MNQ' AND timeframe = '1H')
             """).pl()
 
         if len(vwap_df) > 0 and vwap_df["vwap"][0] is not None:
@@ -328,21 +329,23 @@ async def get_advanced_metrics(
     - LDR < 0.4 = resistance wall (bearish even if price rising)
     """
     with DuckDBStorage() as storage:
-        # Get OHLCV + orderflow data
+        # Get OHLCV + orderflow data (most recent N bars, ordered chronologically)
         df = storage.conn.execute(f"""
-            SELECT
-                timestamp,
-                open,
-                high,
-                low,
-                close,
-                volume,
-                dom_imbalance,
-                cvd as instant_delta
-            FROM ohlcv_ticks
-            WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
-            ORDER BY timestamp ASC
-            LIMIT {limit}
+            SELECT * FROM (
+                SELECT
+                    timestamp,
+                    open,
+                    high,
+                    low,
+                    close,
+                    volume,
+                    dom_imbalance,
+                    cvd as instant_delta
+                FROM ohlcv_ticks
+                WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
+                ORDER BY timestamp DESC
+                LIMIT {limit}
+            ) ORDER BY timestamp ASC
         """).pl()
 
         if len(df) == 0:
@@ -500,21 +503,23 @@ async def get_agent_bias(
     - **70-100 (HIGH_BULLISH)**: Aggressive mode, buy breakouts
     """
     with DuckDBStorage() as storage:
-        # Get OHLCV data with indicators
+        # Get OHLCV data with indicators (most recent N bars, ordered chronologically)
         df = storage.conn.execute(f"""
-            SELECT
-                timestamp,
-                open,
-                high,
-                low,
-                close,
-                volume,
-                dom_imbalance,
-                cvd as instant_delta
-            FROM ohlcv_ticks
-            WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
-            ORDER BY timestamp ASC
-            LIMIT {limit}
+            SELECT * FROM (
+                SELECT
+                    timestamp,
+                    open,
+                    high,
+                    low,
+                    close,
+                    volume,
+                    dom_imbalance,
+                    cvd as instant_delta
+                FROM ohlcv_ticks
+                WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
+                ORDER BY timestamp DESC
+                LIMIT {limit}
+            ) ORDER BY timestamp ASC
         """).pl()
 
         if len(df) == 0:

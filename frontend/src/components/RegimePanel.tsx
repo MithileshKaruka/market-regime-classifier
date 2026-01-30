@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import './RegimePanel.css'
 import {
   API_CONFIG,
@@ -10,6 +10,9 @@ import {
   getDirectionIcon,
 } from '../config'
 import { useWebSocket } from '../hooks/useWebSocket'
+
+// Throttle interval for bar_update refreshes (ms)
+const UPDATE_THROTTLE_MS = 5000
 
 interface TrendStructure {
   score: number
@@ -75,15 +78,21 @@ export default function RegimePanel() {
   const [recentSignals, setRecentSignals] = useState<OrderflowSignal[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedTimeframe, setSelectedTimeframe] = useState('15M')
+  const lastFetchTimeRef = useRef<number>(0)
 
   const fetchData = useCallback(async () => {
+    lastFetchTimeRef.current = Date.now()
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
+
     try {
       // Fetch Agent Bias Score, Agent Decision, and recent signals in parallel
       const [biasResponse, decisionResponse, signalsResponse] = await Promise.all([
-        fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.agentBias}/${selectedTimeframe}`),
-        fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.agentDecision}/${selectedTimeframe}?position=FLAT`),
-        fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.orderflowSignals}/${selectedTimeframe}?limit=${THRESHOLDS.signals.fetchLimit}`)
+        fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.agentBias}/${selectedTimeframe}`, { signal: controller.signal }),
+        fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.agentDecision}/${selectedTimeframe}?position=FLAT`, { signal: controller.signal }),
+        fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.orderflowSignals}/${selectedTimeframe}?limit=${THRESHOLDS.signals.fetchLimit}`, { signal: controller.signal })
       ])
+      clearTimeout(timeoutId)
 
       if (biasResponse.ok) {
         const biasData = await biasResponse.json()
@@ -103,17 +112,31 @@ export default function RegimePanel() {
 
       setLoading(false)
     } catch (error) {
-      console.error('Error fetching data:', error)
+      clearTimeout(timeoutId)
+      if (error instanceof Error && error.name === 'AbortError') {
+        console.warn('Regime panel fetch timed out')
+      } else {
+        console.error('Error fetching data:', error)
+      }
       setAgentBias(getSampleBiasData())
       setRecentSignals(getSampleSignals())
       setLoading(false)
     }
   }, [selectedTimeframe])
 
-  // Subscribe to WebSocket - refresh data on bar close
+  // Throttled fetch for bar_update events (don't flood API on every tick)
+  const throttledFetch = useCallback(() => {
+    const now = Date.now()
+    if (now - lastFetchTimeRef.current >= UPDATE_THROTTLE_MS) {
+      fetchData()
+    }
+  }, [fetchData])
+
+  // Subscribe to WebSocket - refresh data on bar update (throttled) and bar close
   useWebSocket({
     timeframe: selectedTimeframe,
     symbol: SYMBOL_CONFIG.backendSymbol,
+    onBarUpdate: throttledFetch,
     onBarClose: fetchData,
   })
 
@@ -224,10 +247,6 @@ export default function RegimePanel() {
             >
               {agentBias.confidence}
             </span>
-          </div>
-
-          <div className="recommendation">
-            {agentBias.recommendation}
           </div>
 
           {/* Action Card with SL/TP */}

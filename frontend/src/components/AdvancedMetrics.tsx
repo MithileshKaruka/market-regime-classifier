@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import './AdvancedMetrics.css'
 import {
   API_CONFIG,
@@ -11,6 +11,9 @@ import {
   getToxicityColor,
 } from '../config'
 import { useWebSocket } from '../hooks/useWebSocket'
+
+// Throttle interval for bar_update refreshes (ms)
+const UPDATE_THROTTLE_MS = 5000
 
 interface RVOLData {
   rvol: number
@@ -63,10 +66,18 @@ export default function AdvancedMetricsPanel({ timeframe }: AdvancedMetricsProps
   const [metrics, setMetrics] = useState<AdvancedMetrics | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const lastFetchTimeRef = useRef<number>(0)
 
   const fetchMetrics = useCallback(async () => {
+    lastFetchTimeRef.current = Date.now()
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
+
     try {
-      const response = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.advancedMetrics}/${timeframe}`)
+      const response = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.advancedMetrics}/${timeframe}`, {
+        signal: controller.signal
+      })
+      clearTimeout(timeoutId)
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`)
       }
@@ -75,16 +86,30 @@ export default function AdvancedMetricsPanel({ timeframe }: AdvancedMetricsProps
       setError(null)
       setLoading(false)
     } catch (err) {
-      console.error('Error fetching advanced metrics:', err)
+      clearTimeout(timeoutId)
+      if (err instanceof Error && err.name === 'AbortError') {
+        console.warn('Advanced metrics fetch timed out')
+      } else {
+        console.error('Error fetching advanced metrics:', err)
+      }
       setError('Unable to load metrics')
       setLoading(false)
     }
   }, [timeframe])
 
-  // Subscribe to WebSocket - refresh metrics on bar close
+  // Throttled fetch for bar_update events (don't flood API on every tick)
+  const throttledFetch = useCallback(() => {
+    const now = Date.now()
+    if (now - lastFetchTimeRef.current >= UPDATE_THROTTLE_MS) {
+      fetchMetrics()
+    }
+  }, [fetchMetrics])
+
+  // Subscribe to WebSocket - refresh metrics on bar update (throttled) and bar close
   useWebSocket({
     timeframe,
     symbol: SYMBOL_CONFIG.backendSymbol,
+    onBarUpdate: throttledFetch,
     onBarClose: fetchMetrics,
   })
 
