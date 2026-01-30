@@ -424,6 +424,7 @@ _db_paths: Optional[DatabasePathsConfig] = None
 _retention: Optional[RetentionConfig] = None
 _maintenance: Optional[MaintenanceScheduleConfig] = None
 _websocket: Optional[WebSocketConfig] = None
+_streaming: Optional[dict] = None
 
 
 def load_secrets(force_reload: bool = False) -> DatabentoSecretsConfig:
@@ -477,16 +478,17 @@ def load_databento_config(force_reload: bool = False) -> dict:
     """Load Databento streaming configuration
 
     Returns:
-        Dict with all databento config sections
+        Dict with all databento config sections including streaming
     """
-    global _db_paths, _retention, _maintenance, _websocket
+    global _db_paths, _retention, _maintenance, _websocket, _streaming
 
-    if not force_reload and all([_db_paths, _retention, _maintenance, _websocket]):
+    if not force_reload and all([_db_paths, _retention, _maintenance, _websocket, _streaming is not None]):
         return {
             'database': _db_paths,
             'retention': _retention,
             'maintenance': _maintenance,
             'websocket': _websocket,
+            'streaming': _streaming,
         }
 
     if not DATABENTO_CONFIG_PATH.exists():
@@ -495,6 +497,7 @@ def load_databento_config(force_reload: bool = False) -> dict:
         _retention = RetentionConfig()
         _maintenance = MaintenanceScheduleConfig()
         _websocket = WebSocketConfig()
+        _streaming = {}
     else:
         try:
             with open(DATABENTO_CONFIG_PATH, 'r') as f:
@@ -537,6 +540,9 @@ def load_databento_config(force_reload: bool = False) -> dict:
                 push_events=ws.get('push_events', ['bar_update', 'bar_close', 'signal', 'regime_change']),
             )
 
+            # Store streaming section for symbols/dataset/stype_in
+            _streaming = raw.get('streaming', {})
+
             logger.info("Databento config loaded")
 
         except Exception as e:
@@ -545,12 +551,14 @@ def load_databento_config(force_reload: bool = False) -> dict:
             _retention = RetentionConfig()
             _maintenance = MaintenanceScheduleConfig()
             _websocket = WebSocketConfig()
+            _streaming = {}
 
     return {
         'database': _db_paths,
         'retention': _retention,
         'maintenance': _maintenance,
         'websocket': _websocket,
+        'streaming': _streaming,
     }
 
 
