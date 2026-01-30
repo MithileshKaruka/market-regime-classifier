@@ -172,6 +172,9 @@ export const POLLING_INTERVALS = {
 // Chart Configuration
 // ============================================================================
 export const CHART_CONFIG = {
+  // Timezone for chart display (CME reference timezone)
+  timezone: 'America/Chicago',
+
   // Lazy loading
   initialLoad: 1000,
   loadMoreSize: 500,

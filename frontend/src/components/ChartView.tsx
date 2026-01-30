@@ -191,7 +191,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
   useEffect(() => {
     if (!chartContainerRef.current) return
 
-    // Create chart
+    // Create chart with Chicago timezone (CME reference)
     const chart = createChart(chartContainerRef.current, {
       layout: {
         background: { color: COLORS.chart.background },
@@ -203,6 +203,19 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
       },
       width: chartContainerRef.current.clientWidth,
       height: CHART_CONFIG.defaultHeight,
+      localization: {
+        timeFormatter: (time: number) => {
+          const date = new Date(time * 1000)
+          return date.toLocaleString('en-US', {
+            timeZone: CHART_CONFIG.timezone,
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+          })
+        },
+      },
       timeScale: {
         timeVisible: true,
         secondsVisible: false,
