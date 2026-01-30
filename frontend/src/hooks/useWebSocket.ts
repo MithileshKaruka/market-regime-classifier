@@ -50,9 +50,20 @@ export function useWebSocket(options: UseWebSocketOptions) {
 
     const { type, timeframe: msgTimeframe, symbol: msgSymbol, data } = lastMessage
 
-    // Only process messages for our subscription
-    if (msgTimeframe !== timeframe || msgSymbol !== symbol) return
+    // Debug: log all bar messages
+    if (type === 'bar_update' || type === 'bar_close') {
+      console.log(`[useWebSocket] Received ${type}: tf=${msgTimeframe} sym=${msgSymbol}, expecting tf=${timeframe} sym=${symbol}`)
+    }
 
+    // Only process messages for our subscription
+    if (msgTimeframe !== timeframe || msgSymbol !== symbol) {
+      if (type === 'bar_update' || type === 'bar_close') {
+        console.log(`[useWebSocket] FILTERED OUT - mismatch`)
+      }
+      return
+    }
+
+    console.log(`[useWebSocket] Processing ${type} for ${timeframe}:${symbol}`)
     const callbacks = callbacksRef.current
 
     switch (type) {

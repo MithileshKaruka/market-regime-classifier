@@ -133,9 +133,14 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
 
   // Handle real-time bar updates from WebSocket
   const handleBarUpdate = useCallback((data: BarData) => {
-    if (!candlestickSeriesRef.current || !volumeSeriesRef.current) return
+    console.log(`[ChartView] handleBarUpdate called:`, data)
+    if (!candlestickSeriesRef.current || !volumeSeriesRef.current) {
+      console.log(`[ChartView] Series refs not ready`)
+      return
+    }
 
     const time = parseTimestamp(data.timestamp)
+    console.log(`[ChartView] Updating chart at time=${time}, close=${data.close}`)
 
     // Update candlestick (creates new bar or updates existing rightmost bar)
     candlestickSeriesRef.current.update({

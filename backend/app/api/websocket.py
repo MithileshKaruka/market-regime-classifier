@@ -86,6 +86,10 @@ class ConnectionManager:
 
     async def send_bar_update(self, timeframe: str, symbol: str, bar: dict):
         """Send bar update to subscribers"""
+        sub_key = f"{timeframe}:{symbol}"
+        connections = self.active_connections.get(sub_key, set())
+        logger.debug(f"[WS] send_bar_update {sub_key}: {len(connections)} subscribers, {len(self.all_connections)} total connections")
+
         message = {
             "type": "bar_update",
             "timeframe": timeframe,
@@ -93,7 +97,7 @@ class ConnectionManager:
             "data": bar,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        await self.send_to_subscribers(f"{timeframe}:{symbol}", message)
+        await self.send_to_subscribers(sub_key, message)
 
     async def send_bar_close(self, timeframe: str, symbol: str, bar: dict):
         """Send bar close notification to subscribers"""

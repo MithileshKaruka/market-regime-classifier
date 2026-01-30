@@ -11,24 +11,10 @@ import {
 } from '../config'
 
 interface AgentDecision {
-  timestamp: number
-  timeframe: string
-  symbol: string
-  current_price: number
-  bias_score: number
-  agent_mode: string
-  confidence: string
-  trend_score: number
-  intensity_score: number
-  orderflow_score: number
-  position: string
-  entry_price: number | null
   action: string
   action_reason: string
   stop_loss: number | null
   take_profit: number | null
-  iterations: number
-  messages: string[]
 }
 
 interface BiasDetails {
@@ -73,27 +59,26 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
   const [biasDetails, setBiasDetails] = useState<BiasDetails | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [position, setPosition] = useState<'FLAT' | 'LONG' | 'SHORT'>('FLAT')
   const [showReasoning, setShowReasoning] = useState(false)
 
-  const fetchAgentDecision = async () => {
+  const fetchBiasScore = async () => {
     setLoading(true)
     setError(null)
     try {
-      // Fetch both agent decision and detailed bias in parallel
+      // Fetch both agent decision (for action/SL/TP) and detailed bias in parallel
       const [agentRes, biasRes] = await Promise.all([
-        fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.agentDecision}/${timeframe}?position=${position}`),
+        fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.agentDecision}/${timeframe}?position=FLAT`),
         fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.agentBias}/${timeframe}`)
       ])
 
-      if (!agentRes.ok) throw new Error('Failed to fetch agent decision')
-      const agentData = await agentRes.json()
-      setDecision(agentData)
-
-      if (biasRes.ok) {
-        const biasData = await biasRes.json()
-        setBiasDetails(biasData)
+      if (agentRes.ok) {
+        const agentData = await agentRes.json()
+        setDecision(agentData)
       }
+
+      if (!biasRes.ok) throw new Error('Failed to fetch bias score')
+      const data = await biasRes.json()
+      setBiasDetails(data)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error')
     } finally {
@@ -102,15 +87,15 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
   }
 
   useEffect(() => {
-    fetchAgentDecision()
+    fetchBiasScore()
   }, [timeframe])
 
   if (error) {
     return (
       <div className="agent-panel">
         <div className="agent-header">
-          <h3>Trading Agent</h3>
-          <button onClick={fetchAgentDecision} className="refresh-btn">Retry</button>
+          <h3>Market Bias</h3>
+          <button onClick={fetchBiasScore} className="refresh-btn">Retry</button>
         </div>
         <div className="agent-error">{error}</div>
       </div>
@@ -120,28 +105,17 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
   return (
     <div className="agent-panel">
       <div className="agent-header">
-        <h3>Trading Agent</h3>
-        <div className="agent-controls">
-          <select
-            value={position}
-            onChange={(e) => setPosition(e.target.value as 'FLAT' | 'LONG' | 'SHORT')}
-            className="position-select"
-          >
-            <option value="FLAT">Flat</option>
-            <option value="LONG">Long</option>
-            <option value="SHORT">Short</option>
-          </select>
-          <button
-            onClick={fetchAgentDecision}
-            className="refresh-btn"
-            disabled={loading}
-          >
-            {loading ? '...' : 'Run'}
-          </button>
-        </div>
+        <h3>Market Bias</h3>
+        <button
+          onClick={fetchBiasScore}
+          className="refresh-btn"
+          disabled={loading}
+        >
+          {loading ? '...' : 'Refresh'}
+        </button>
       </div>
 
-      {decision && (
+      {biasDetails && (
         <>
           {/* Bias Score Gauge */}
           <div className="bias-gauge">
@@ -149,14 +123,14 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
               <span>Bias Score</span>
               <span
                 className="score-value"
-                style={{ color: getModeColor(decision.agent_mode) }}
+                style={{ color: getModeColor(biasDetails.mode) }}
               >
-                {decision.bias_score.toFixed(1)}
+                {biasDetails.total_score.toFixed(1)}
               </span>
             </div>
             <div
               className="gauge-bar"
-              style={{ background: getScoreGradient(decision.bias_score) }}
+              style={{ background: getScoreGradient(biasDetails.total_score) }}
             />
             <div className="gauge-labels">
               <span>Bearish</span>
@@ -165,46 +139,48 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
             </div>
           </div>
 
-          {/* Mode & Action */}
+          {/* Mode & Confidence */}
           <div className="agent-mode">
             <div
               className="mode-badge"
-              style={{ backgroundColor: getModeColor(decision.agent_mode) }}
+              style={{ backgroundColor: getModeColor(biasDetails.mode) }}
             >
-              {decision.agent_mode.replace('_', ' ')}
+              {biasDetails.mode.replace('_', ' ')}
             </div>
             <div className="confidence-badge">
-              {decision.confidence}
+              {biasDetails.confidence}
             </div>
           </div>
 
-          {/* Action Card */}
-          <div
-            className="action-card"
-            style={{ borderColor: getActionColor(decision.action) }}
-          >
-            <div className="action-label">Recommended Action</div>
+          {/* Action Card with SL/TP */}
+          {decision && (
             <div
-              className="action-value"
-              style={{ color: getActionColor(decision.action) }}
+              className="action-card"
+              style={{ borderColor: getActionColor(decision.action) }}
             >
-              {decision.action.replace('_', ' ')}
-            </div>
-            <div className="action-reason">{decision.action_reason}</div>
-
-            {decision.stop_loss && decision.take_profit && (
-              <div className="trade-levels">
-                <div className="level stop-loss">
-                  <span>SL</span>
-                  <span>${decision.stop_loss.toFixed(2)}</span>
-                </div>
-                <div className="level take-profit">
-                  <span>TP</span>
-                  <span>${decision.take_profit.toFixed(2)}</span>
-                </div>
+              <div className="action-label">Recommended Action</div>
+              <div
+                className="action-value"
+                style={{ color: getActionColor(decision.action) }}
+              >
+                {decision.action.replace('_', ' ')}
               </div>
-            )}
-          </div>
+              <div className="action-reason">{decision.action_reason}</div>
+
+              {decision.stop_loss && decision.take_profit && (
+                <div className="trade-levels">
+                  <div className="level stop-loss">
+                    <span>SL</span>
+                    <span>${decision.stop_loss.toFixed(2)}</span>
+                  </div>
+                  <div className="level take-profit">
+                    <span>TP</span>
+                    <span>${decision.take_profit.toFixed(2)}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Component Scores */}
           <div className="component-scores">
@@ -214,12 +190,12 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
                 <div
                   className="score-bar"
                   style={{
-                    width: `${decision.trend_score}%`,
-                    backgroundColor: decision.trend_score >= THRESHOLDS.score.midpoint ? COLORS.bullishLight : COLORS.bearish
+                    width: `${biasDetails.trend_structure.score}%`,
+                    backgroundColor: biasDetails.trend_structure.score >= THRESHOLDS.score.midpoint ? COLORS.bullishLight : COLORS.bearish
                   }}
                 />
               </div>
-              <span className="score-num">{decision.trend_score.toFixed(0)}</span>
+              <span className="score-num">{biasDetails.trend_structure.score.toFixed(0)}</span>
             </div>
             <div className="score-row">
               <span className="score-label">{SCORE_WEIGHTS.intensity.label} ({SCORE_WEIGHTS.intensity.weight}%)</span>
@@ -227,12 +203,12 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
                 <div
                   className="score-bar"
                   style={{
-                    width: `${decision.intensity_score}%`,
-                    backgroundColor: decision.intensity_score >= THRESHOLDS.score.midpoint ? COLORS.bullishLight : COLORS.bearish
+                    width: `${biasDetails.market_intensity.score}%`,
+                    backgroundColor: biasDetails.market_intensity.score >= THRESHOLDS.score.midpoint ? COLORS.bullishLight : COLORS.bearish
                   }}
                 />
               </div>
-              <span className="score-num">{decision.intensity_score.toFixed(0)}</span>
+              <span className="score-num">{biasDetails.market_intensity.score.toFixed(0)}</span>
             </div>
             <div className="score-row">
               <span className="score-label">{SCORE_WEIGHTS.orderflow.label} ({SCORE_WEIGHTS.orderflow.weight}%)</span>
@@ -240,37 +216,29 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
                 <div
                   className="score-bar"
                   style={{
-                    width: `${decision.orderflow_score}%`,
-                    backgroundColor: decision.orderflow_score >= THRESHOLDS.score.midpoint ? COLORS.bullishLight : COLORS.bearish
+                    width: `${biasDetails.orderflow_alpha.score}%`,
+                    backgroundColor: biasDetails.orderflow_alpha.score >= THRESHOLDS.score.midpoint ? COLORS.bullishLight : COLORS.bearish
                   }}
                 />
               </div>
-              <span className="score-num">{decision.orderflow_score.toFixed(0)}</span>
+              <span className="score-num">{biasDetails.orderflow_alpha.score.toFixed(0)}</span>
             </div>
           </div>
 
-          {/* Price Info */}
-          <div className="price-info">
-            <div className="info-row">
-              <span>Symbol</span>
-              <span>{decision.symbol}</span>
+          {/* Active Signals */}
+          {biasDetails.orderflow_alpha.active_signals.length > 0 && (
+            <div className="active-signals-banner">
+              <span className="signals-label">Active Signals:</span>
+              <span className="signals-list">{biasDetails.orderflow_alpha.active_signals.join(', ')}</span>
             </div>
-            <div className="info-row">
-              <span>Price</span>
-              <span>${decision.current_price.toFixed(2)}</span>
-            </div>
-            <div className="info-row">
-              <span>Timeframe</span>
-              <span>{decision.timeframe}</span>
-            </div>
-          </div>
+          )}
 
           {/* Show Reasoning Button */}
           <button
             className="reasoning-toggle"
             onClick={() => setShowReasoning(true)}
           >
-            View Reasoning
+            View Details
           </button>
         </>
       )}
@@ -280,7 +248,7 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
         <div className="reasoning-overlay" onClick={() => setShowReasoning(false)}>
           <div className="reasoning-content" onClick={(e) => e.stopPropagation()}>
             <div className="reasoning-header">
-              <h3>Score Reasoning</h3>
+              <h3>Bias Analysis Details</h3>
               <button className="close-btn" onClick={() => setShowReasoning(false)}>×</button>
             </div>
 
@@ -400,8 +368,8 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
         </div>
       )}
 
-      {loading && !decision && (
-        <div className="agent-loading">Running agent...</div>
+      {loading && !biasDetails && (
+        <div className="agent-loading">Loading bias analysis...</div>
       )}
     </div>
   )

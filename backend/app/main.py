@@ -1,4 +1,5 @@
 """FastAPI application for Market Regime Classifier"""
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -15,16 +16,57 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Background task reference for live ingestion
+_live_ingestion_task: asyncio.Task | None = None
+
+
+async def start_live_ingestion():
+    """Start live data ingestion as a background task"""
+    try:
+        from app.streaming.live_ingestion import LiveDataIngestion
+        from config import get_secrets
+
+        secrets = get_secrets()
+        if not secrets.api_key:
+            logger.warning("Databento API key not configured - live ingestion disabled")
+            return
+
+        logger.info("Starting live data ingestion in background...")
+        ingestion = LiveDataIngestion()
+        await ingestion.start_streaming()
+    except ImportError as e:
+        logger.warning(f"Live ingestion module not available: {e}")
+    except Exception as e:
+        logger.error(f"Live ingestion error: {e}", exc_info=True)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown"""
+    global _live_ingestion_task
+
     # Startup
     logger.info("Starting Market Regime Classifier API...")
-    # TODO: Initialize data store, load historical data, etc.
+
+    # Start live ingestion as background task (production only)
+    if os.getenv("ENVIRONMENT") == "production":
+        _live_ingestion_task = asyncio.create_task(start_live_ingestion())
+        logger.info("Live ingestion task started")
+    else:
+        logger.info("Development mode - live ingestion disabled (run separately if needed)")
+
     yield
+
     # Shutdown
     logger.info("Shutting down Market Regime Classifier API...")
+
+    # Cancel live ingestion task
+    if _live_ingestion_task and not _live_ingestion_task.done():
+        _live_ingestion_task.cancel()
+        try:
+            await _live_ingestion_task
+        except asyncio.CancelledError:
+            logger.info("Live ingestion task cancelled")
     # TODO: Cleanup resources
 
 
