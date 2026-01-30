@@ -5,10 +5,10 @@ streaming:
   dataset: "GLBX.MDP3"
 
   # Symbols to stream
-  # Use specific contract month (MNQH26 = March 2026) to avoid multi-contract interference
-  # Update quarterly: H=Mar, M=Jun, U=Sep, Z=Dec
+  # Use continuous front-month contract to get single active contract
+  # MNQ.c.0 = front-month continuous (auto-rolls at expiration)
   symbols:
-    - "MNQH26"  # Micro E-mini Nasdaq-100 March 2026
+    - "MNQ.c.0"  # Micro E-mini Nasdaq-100 front-month
 
   # Schemas to subscribe
   schemas:
@@ -16,7 +16,7 @@ streaming:
     # - "trades"  # Reserved for future: footprint charts
 
   # Symbol type for subscription
-  stype_in: "raw_symbol"  # Use specific contract symbol
+  stype_in: "continuous"  # Use continuous contract symbology
 
   # Timeframes to aggregate
   timeframes:
