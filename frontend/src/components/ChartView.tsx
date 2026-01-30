@@ -191,6 +191,15 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
   useEffect(() => {
     if (!chartContainerRef.current) return
 
+    // Helper to format time in Chicago timezone
+    const formatChicagoTime = (unixSeconds: number, options: Intl.DateTimeFormatOptions): string => {
+      const date = new Date(unixSeconds * 1000)
+      return new Intl.DateTimeFormat('en-US', {
+        ...options,
+        timeZone: CHART_CONFIG.timezone,
+      }).format(date)
+    }
+
     // Create chart with Chicago timezone (CME reference)
     const chart = createChart(chartContainerRef.current, {
       layout: {
@@ -204,10 +213,8 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
       width: chartContainerRef.current.clientWidth,
       height: CHART_CONFIG.defaultHeight,
       localization: {
-        timeFormatter: (time: number) => {
-          const date = new Date(time * 1000)
-          return date.toLocaleString('en-US', {
-            timeZone: CHART_CONFIG.timezone,
+        timeFormatter: (time: number): string => {
+          return formatChicagoTime(time, {
             month: 'short',
             day: 'numeric',
             hour: '2-digit',
@@ -219,21 +226,19 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
       timeScale: {
         timeVisible: true,
         secondsVisible: false,
-        tickMarkFormatter: (time: number, tickMarkType: number, locale: string) => {
-          const date = new Date(time * 1000)
-          const tz = CHART_CONFIG.timezone
+        tickMarkFormatter: (time: number, tickMarkType: number, _locale: string): string => {
           // TickMarkType: 0=Year, 1=Month, 2=DayOfMonth, 3=Time, 4=TimeWithSeconds
           switch (tickMarkType) {
             case 0: // Year
-              return date.toLocaleString('en-US', { timeZone: tz, year: 'numeric' })
+              return formatChicagoTime(time, { year: 'numeric' })
             case 1: // Month
-              return date.toLocaleString('en-US', { timeZone: tz, month: 'short' })
+              return formatChicagoTime(time, { month: 'short' })
             case 2: // DayOfMonth
-              return date.toLocaleString('en-US', { timeZone: tz, day: 'numeric' })
+              return formatChicagoTime(time, { day: 'numeric' })
             case 3: // Time
             case 4: // TimeWithSeconds
             default:
-              return date.toLocaleString('en-US', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false })
+              return formatChicagoTime(time, { hour: '2-digit', minute: '2-digit', hour12: false })
           }
         },
       },
