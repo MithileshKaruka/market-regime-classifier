@@ -105,8 +105,17 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
   // ============================================================================
 
   // Convert ISO timestamp to Unix seconds for lightweight-charts
+  // Adjusts to Chicago timezone by calculating the offset
   const parseTimestamp = useCallback((isoString: string): number => {
-    return Math.floor(new Date(isoString).getTime() / 1000)
+    const date = new Date(isoString)
+    const utcMs = date.getTime()
+    // Get Chicago time string and parse it back to get the offset
+    const chicagoStr = date.toLocaleString('en-US', { timeZone: CHART_CONFIG.timezone })
+    const chicagoDate = new Date(chicagoStr)
+    // Calculate offset in seconds (Chicago is behind UTC, so offset is negative)
+    const offsetMs = chicagoDate.getTime() - new Date(date.toLocaleString('en-US', { timeZone: 'UTC' })).getTime()
+    // Return adjusted timestamp (UTC + offset to show Chicago time on chart)
+    return Math.floor((utcMs + offsetMs) / 1000)
   }, [])
 
   // Handle real-time bar updates from WebSocket
@@ -191,16 +200,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
   useEffect(() => {
     if (!chartContainerRef.current) return
 
-    // Helper to format time in Chicago timezone
-    const formatChicagoTime = (unixSeconds: number, options: Intl.DateTimeFormatOptions): string => {
-      const date = new Date(unixSeconds * 1000)
-      return new Intl.DateTimeFormat('en-US', {
-        ...options,
-        timeZone: CHART_CONFIG.timezone,
-      }).format(date)
-    }
-
-    // Create chart with Chicago timezone (CME reference)
+    // Create chart (timestamps already adjusted to Chicago timezone in parseTimestamp)
     const chart = createChart(chartContainerRef.current, {
       layout: {
         background: { color: COLORS.chart.background },
@@ -212,35 +212,9 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
       },
       width: chartContainerRef.current.clientWidth,
       height: CHART_CONFIG.defaultHeight,
-      localization: {
-        timeFormatter: (time: number): string => {
-          return formatChicagoTime(time, {
-            month: 'short',
-            day: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-            hour12: false,
-          })
-        },
-      },
       timeScale: {
         timeVisible: true,
         secondsVisible: false,
-        tickMarkFormatter: (time: number, tickMarkType: number, _locale: string): string => {
-          // TickMarkType: 0=Year, 1=Month, 2=DayOfMonth, 3=Time, 4=TimeWithSeconds
-          switch (tickMarkType) {
-            case 0: // Year
-              return formatChicagoTime(time, { year: 'numeric' })
-            case 1: // Month
-              return formatChicagoTime(time, { month: 'short' })
-            case 2: // DayOfMonth
-              return formatChicagoTime(time, { day: 'numeric' })
-            case 3: // Time
-            case 4: // TimeWithSeconds
-            default:
-              return formatChicagoTime(time, { hour: '2-digit', minute: '2-digit', hour12: false })
-          }
-        },
       },
       handleScroll: {
         mouseWheel: true,
