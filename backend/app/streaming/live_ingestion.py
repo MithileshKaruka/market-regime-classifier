@@ -478,13 +478,16 @@ class LiveDataIngestion:
             logger.info(f"Archiving to DBN: {dbn_path}")
 
             # Subscribe to MBP-1 (top-of-book quotes)
+            # Get stype_in from config (raw_symbol for specific contracts, parent for continuous)
+            db_config = get_databento_config()
+            stype_in = db_config.get('streaming', {}).get('stype_in', 'raw_symbol')
             client.subscribe(
                 dataset=self.dataset,
                 schema="mbp-1",
                 symbols=self.symbols,
-                stype_in="parent",
+                stype_in=stype_in,
             )
-            logger.info("Subscribed to MBP-1")
+            logger.info(f"Subscribed to MBP-1 with stype_in={stype_in}")
 
             tick_count = 0
             last_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
@@ -496,13 +499,10 @@ class LiveDataIngestion:
                     # Map instrument_id to config symbol
                     instrument_id = record.instrument_id
                     raw_symbol = record.stype_in_symbol
-                    # Databento may return "MNQ" but our config uses "MNQ.FUT"
-                    # Find the matching config symbol
+                    # Only accept EXACT matches to avoid multi-contract interference
                     config_symbol = None
                     for s in self.symbols:
-                        # Match "MNQ" to "MNQ.FUT" or exact match
-                        root = s.split('.')[0] if '.' in s else s
-                        if raw_symbol == s or raw_symbol == root:
+                        if raw_symbol == s:
                             config_symbol = s
                             break
                     if config_symbol:
