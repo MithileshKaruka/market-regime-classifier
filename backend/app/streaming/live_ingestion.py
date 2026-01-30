@@ -60,8 +60,10 @@ class LiveDataIngestion:
         db_config = get_databento_config()
 
         self.api_key = api_key or secrets.api_key
-        self.dataset = dataset or streaming_config.dataset
-        self.symbols = symbols or streaming_config.default_symbols
+        # Load dataset and symbols from databento_config.yaml (preferred) or fall back to app config
+        db_streaming = db_config.get('streaming', {})
+        self.dataset = dataset or db_streaming.get('dataset', streaming_config.dataset)
+        self.symbols = symbols or db_streaming.get('symbols', streaming_config.default_symbols)
         self.timeframes = timeframes or streaming_config.default_timeframes
         self.db_path = db_path or db_config['database'].main_db
         self.flush_interval = flush_interval_seconds or streaming_config.flush_interval_seconds
