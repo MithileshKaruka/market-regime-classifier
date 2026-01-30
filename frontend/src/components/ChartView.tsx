@@ -219,14 +219,22 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
       timeScale: {
         timeVisible: true,
         secondsVisible: false,
-        tickMarkFormatter: (time: number) => {
+        tickMarkFormatter: (time: number, tickMarkType: number, locale: string) => {
           const date = new Date(time * 1000)
-          return date.toLocaleString('en-US', {
-            timeZone: CHART_CONFIG.timezone,
-            hour: '2-digit',
-            minute: '2-digit',
-            hour12: false,
-          })
+          const tz = CHART_CONFIG.timezone
+          // TickMarkType: 0=Year, 1=Month, 2=DayOfMonth, 3=Time, 4=TimeWithSeconds
+          switch (tickMarkType) {
+            case 0: // Year
+              return date.toLocaleString('en-US', { timeZone: tz, year: 'numeric' })
+            case 1: // Month
+              return date.toLocaleString('en-US', { timeZone: tz, month: 'short' })
+            case 2: // DayOfMonth
+              return date.toLocaleString('en-US', { timeZone: tz, day: 'numeric' })
+            case 3: // Time
+            case 4: // TimeWithSeconds
+            default:
+              return date.toLocaleString('en-US', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false })
+          }
         },
       },
       handleScroll: {
