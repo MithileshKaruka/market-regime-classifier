@@ -175,11 +175,15 @@ class LiveDataIngestion:
 
     async def _default_bar_update(self, timeframe: str, symbol: str, bar: dict):
         """Default callback: push bar update via WebSocket"""
-        await self._ws_manager.send_bar_update(timeframe, symbol, bar)
+        # Normalize symbol for WebSocket (consistent with database: MNQ not MNQ.c.0)
+        ws_symbol = normalize_symbol(symbol)
+        await self._ws_manager.send_bar_update(timeframe, ws_symbol, bar)
 
     async def _default_bar_close(self, timeframe: str, symbol: str, bar: dict):
         """Default callback: push bar close via WebSocket"""
-        await self._ws_manager.send_bar_close(timeframe, symbol, bar)
+        # Normalize symbol for WebSocket (consistent with database: MNQ not MNQ.c.0)
+        ws_symbol = normalize_symbol(symbol)
+        await self._ws_manager.send_bar_close(timeframe, ws_symbol, bar)
 
     async def _default_signal(self, timeframe: str, symbol: str, signal: dict):
         """Default callback: push signal via WebSocket"""

@@ -47,7 +47,7 @@ export const WEBSOCKET_CONFIG = {
 // ============================================================================
 export const SYMBOL_CONFIG = {
   displaySymbol: 'MNQ',
-  backendSymbol: 'MNQH26',  // Specific contract - update quarterly: H=Mar, M=Jun, U=Sep, Z=Dec
+  backendSymbol: 'MNQ',  // Normalized root symbol for WebSocket subscriptions
 } as const
 
 export function toBackendSymbol(_display: string): string {
