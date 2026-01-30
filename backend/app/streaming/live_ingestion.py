@@ -22,7 +22,9 @@ def normalize_symbol(symbol: str) -> str:
 
     Handles multiple formats:
     - "MNQH26" -> "MNQ" (strips contract month code H/M/U/Z + 2 digits)
+    - "MNQH6" -> "MNQ" (strips short format: H/M/U/Z + 1 digit)
     - "MNQ.FUT" -> "MNQ" (strips .FUT suffix)
+    - "MNQ.c.0" -> "MNQ" (strips .c.0 continuous suffix)
     - "MNQ" -> "MNQ" (unchanged)
 
     Args:
@@ -35,8 +37,8 @@ def normalize_symbol(symbol: str) -> str:
         return symbol
     # First strip any .suffix (e.g., .FUT, .c.0)
     base = symbol.split('.')[0]
-    # Then strip contract month code (H/M/U/Z followed by 2 digits at end)
-    return re.sub(r'[HMUZ]\d{2}$', '', base)
+    # Then strip contract month code (H/M/U/Z followed by 1-2 digits at end)
+    return re.sub(r'[HMUZ]\d{1,2}$', '', base)
 
 from app.features.order_flow import OrderFlowCalculator
 from app.classifiers.regime import RegimeClassifier
@@ -524,17 +526,18 @@ class LiveDataIngestion:
                     # Map instrument_id to config symbol
                     instrument_id = record.instrument_id
                     raw_symbol = record.stype_in_symbol
-                    # Only accept EXACT matches to avoid multi-contract interference
+                    # Match by normalized root symbol (MNQH6 -> MNQ matches MNQ.c.0 -> MNQ)
+                    raw_root = normalize_symbol(raw_symbol)
                     config_symbol = None
                     for s in self.symbols:
-                        if raw_symbol == s:
+                        if normalize_symbol(s) == raw_root:
                             config_symbol = s
                             break
                     if config_symbol:
                         self.instrument_id_to_symbol[instrument_id] = config_symbol
-                        logger.info(f"Symbol mapping: instrument_id={instrument_id} -> {raw_symbol} (config: {config_symbol})")
+                        logger.info(f"Symbol mapping: instrument_id={instrument_id} -> {raw_symbol} (root: {raw_root}, config: {config_symbol})")
                     else:
-                        logger.warning(f"Unknown symbol from Databento: {raw_symbol}, instrument_id={instrument_id}")
+                        logger.warning(f"Unknown symbol from Databento: {raw_symbol} (root: {raw_root}), instrument_id={instrument_id}")
 
                 elif record_type == "MBP1Msg":
                     # Quote update - process and update bars
