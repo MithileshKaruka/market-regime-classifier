@@ -219,6 +219,15 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
       timeScale: {
         timeVisible: true,
         secondsVisible: false,
+        tickMarkFormatter: (time: number) => {
+          const date = new Date(time * 1000)
+          return date.toLocaleString('en-US', {
+            timeZone: CHART_CONFIG.timezone,
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+          })
+        },
       },
       handleScroll: {
         mouseWheel: true,
