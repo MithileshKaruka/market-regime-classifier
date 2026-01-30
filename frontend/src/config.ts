@@ -50,7 +50,7 @@ export const SYMBOL_CONFIG = {
   backendSymbol: 'MNQH26',  // Specific contract - update quarterly: H=Mar, M=Jun, U=Sep, Z=Dec
 } as const
 
-export function toBackendSymbol(display: string): string {
+export function toBackendSymbol(_display: string): string {
   // For now, just use the configured backend symbol
   return SYMBOL_CONFIG.backendSymbol
 }

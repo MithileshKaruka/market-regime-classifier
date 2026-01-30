@@ -101,22 +101,35 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
   }, [isLoadingMore])
 
   // ============================================================================
+  // Timezone Adjustment Helpers
+  // ============================================================================
+
+  // Adjust UTC Unix timestamp (seconds) to display as Chicago time on chart
+  // lightweight-charts interprets timestamps as local time, so we shift the timestamp
+  const adjustToChicago = useCallback((utcTimestamp: number): number => {
+    const utcMs = utcTimestamp * 1000
+    const date = new Date(utcMs)
+    // Get Chicago time string and parse it back to get the offset
+    const chicagoStr = date.toLocaleString('en-US', { timeZone: CHART_CONFIG.timezone })
+    const utcStr = date.toLocaleString('en-US', { timeZone: 'UTC' })
+    const chicagoDate = new Date(chicagoStr)
+    const utcDate = new Date(utcStr)
+    // Calculate offset in ms (Chicago is behind UTC, so offset is negative)
+    const offsetMs = chicagoDate.getTime() - utcDate.getTime()
+    // Return adjusted timestamp
+    return Math.floor((utcMs + offsetMs) / 1000)
+  }, [])
+
+  // ============================================================================
   // WebSocket Real-time Updates
   // ============================================================================
 
-  // Convert ISO timestamp to Unix seconds for lightweight-charts
-  // Adjusts to Chicago timezone by calculating the offset
+  // Convert ISO timestamp to Unix seconds for lightweight-charts (Chicago timezone)
   const parseTimestamp = useCallback((isoString: string): number => {
     const date = new Date(isoString)
-    const utcMs = date.getTime()
-    // Get Chicago time string and parse it back to get the offset
-    const chicagoStr = date.toLocaleString('en-US', { timeZone: CHART_CONFIG.timezone })
-    const chicagoDate = new Date(chicagoStr)
-    // Calculate offset in seconds (Chicago is behind UTC, so offset is negative)
-    const offsetMs = chicagoDate.getTime() - new Date(date.toLocaleString('en-US', { timeZone: 'UTC' })).getTime()
-    // Return adjusted timestamp (UTC + offset to show Chicago time on chart)
-    return Math.floor((utcMs + offsetMs) / 1000)
-  }, [])
+    const utcSeconds = Math.floor(date.getTime() / 1000)
+    return adjustToChicago(utcSeconds)
+  }, [adjustToChicago])
 
   // Handle real-time bar updates from WebSocket
   const handleBarUpdate = useCallback((data: BarData) => {
@@ -143,15 +156,16 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
 
   // Handle bar close - finalize the bar and update state
   const handleBarClose = useCallback((data: BarData) => {
-    // Update chart one final time
+    // Update chart one final time (chart uses Chicago-adjusted time)
     handleBarUpdate(data)
 
-    // Update loaded bars state to include the finalized bar
-    const time = parseTimestamp(data.timestamp)
+    // Store in loadedBars using UTC timestamp (consistent with API data)
+    // The timezone adjustment happens only at render time in updateChartWithBars
+    const utcTime = Math.floor(new Date(data.timestamp).getTime() / 1000)
     setLoadedBars(prev => {
-      const idx = prev.findIndex(b => b.time === time)
+      const idx = prev.findIndex(b => b.time === utcTime)
       const newBar: ChartBar = {
-        time,
+        time: utcTime,  // Store UTC, display adjustment happens in updateChartWithBars
         open: data.open,
         high: data.high,
         low: data.low,
@@ -167,7 +181,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
       }
       return [...prev, newBar]
     })
-  }, [handleBarUpdate, parseTimestamp])
+  }, [handleBarUpdate])
 
   // Handle new signals from WebSocket
   const handleSignal = useCallback((data: SignalData) => {
@@ -329,25 +343,25 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
     }
   }, [timeframe]) // Only re-subscribe when timeframe changes
 
-  // Helper function to update chart with bars
-  const updateChartWithBars = (bars: ChartBar[]) => {
+  // Helper function to update chart with bars (applies Chicago timezone adjustment)
+  const updateChartWithBars = useCallback((bars: ChartBar[]) => {
     if (!candlestickSeriesRef.current || !volumeSeriesRef.current) return
 
     // Sort by time
     const sortedBars = [...bars].sort((a, b) => a.time - b.time)
 
-    // Prepare candlestick data
+    // Prepare candlestick data (adjust timestamp to Chicago timezone)
     const candlestickData = sortedBars.map((bar) => ({
-      time: bar.time as any,
+      time: adjustToChicago(bar.time) as any,
       open: bar.open,
       high: bar.high,
       low: bar.low,
       close: bar.close,
     }))
 
-    // Prepare volume data
+    // Prepare volume data (adjust timestamp to Chicago timezone)
     const volumeData = sortedBars.map((bar) => ({
-      time: bar.time as any,
+      time: adjustToChicago(bar.time) as any,
       value: bar.volume,
       color: bar.close >= bar.open ? COLORS.chart.volumeUp : COLORS.chart.volumeDown,
     }))
@@ -355,20 +369,20 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
     candlestickSeriesRef.current.setData(candlestickData)
     volumeSeriesRef.current.setData(volumeData)
 
-    // Update indicator series
+    // Update indicator series (adjust timestamp to Chicago timezone)
     ALL_INDICATOR_KEYS.forEach(key => {
       const series = indicatorSeriesRef.current.get(key)
       if (series) {
         const data = sortedBars
           .filter(bar => (bar as any)[key] != null)
           .map(bar => ({
-            time: bar.time as any,
+            time: adjustToChicago(bar.time) as any,
             value: (bar as any)[key],
           }))
         series.setData(data)
       }
     })
-  }
+  }, [adjustToChicago])
 
   // Load more historical data (uses refs to avoid stale closure issues)
   const loadMoreData = async () => {
@@ -527,7 +541,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
             }
 
             return {
-              time: signal.timestamp as any,
+              time: adjustToChicago(signal.timestamp) as any,
               position: position,
               color: color,
               shape: shape,
@@ -740,7 +754,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
       }
 
       return {
-        time: signal.timestamp as any,
+        time: adjustToChicago(signal.timestamp) as any,
         position: position,
         color: color,
         shape: shape,
@@ -754,7 +768,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
 
     candlestickSeriesRef.current.setMarkers(markers as any)
     console.log(`[Orderflow] Applied ${markers.length} markers to chart`)
-  }, [orderflowSignals, showOrderflowSignals])
+  }, [orderflowSignals, showOrderflowSignals, adjustToChicago])
 
   return (
     <div
