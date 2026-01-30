@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import './RegimePanel.css'
 import {
   API_CONFIG,
@@ -6,8 +6,10 @@ import {
   POLLING_INTERVALS,
   THRESHOLDS,
   LABELS,
+  SYMBOL_CONFIG,
   getDirectionIcon,
 } from '../config'
+import { useWebSocket } from '../hooks/useWebSocket'
 
 interface TrendStructure {
   score: number
@@ -74,13 +76,7 @@ export default function RegimePanel() {
   const [loading, setLoading] = useState(true)
   const [selectedTimeframe, setSelectedTimeframe] = useState('15M')
 
-  useEffect(() => {
-    fetchData()
-    const interval = setInterval(fetchData, POLLING_INTERVALS.domSignals)
-    return () => clearInterval(interval)
-  }, [selectedTimeframe])
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     try {
       // Fetch Agent Bias Score, Agent Decision, and recent signals in parallel
       const [biasResponse, decisionResponse, signalsResponse] = await Promise.all([
@@ -112,7 +108,21 @@ export default function RegimePanel() {
       setRecentSignals(getSampleSignals())
       setLoading(false)
     }
-  }
+  }, [selectedTimeframe])
+
+  // Subscribe to WebSocket - refresh data on bar close
+  useWebSocket({
+    timeframe: selectedTimeframe,
+    symbol: SYMBOL_CONFIG.backendSymbol,
+    onBarClose: fetchData,
+  })
+
+  useEffect(() => {
+    fetchData()
+    // Keep polling as fallback (longer interval since WebSocket handles real-time)
+    const interval = setInterval(fetchData, POLLING_INTERVALS.domSignals * 3)
+    return () => clearInterval(interval)
+  }, [selectedTimeframe, fetchData])
 
   if (loading) {
     return (

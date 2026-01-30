@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import './OrderFlowMetrics.css'
-import { API_CONFIG, COLORS, POLLING_INTERVALS, LABELS } from '../config'
+import { API_CONFIG, COLORS, POLLING_INTERVALS, LABELS, SYMBOL_CONFIG } from '../config'
+import { useWebSocket } from '../hooks/useWebSocket'
 
 interface DOMSummary {
   timeframe: string
@@ -28,14 +29,7 @@ export default function OrderFlowMetrics({ timeframe }: OrderFlowMetricsProps) {
   const [metrics, setMetrics] = useState<SimplifiedMetrics | null>(null)
   const [loading, setLoading] = useState(true)
 
-  useEffect(() => {
-    fetchMetrics()
-    // Poll for updates
-    const interval = setInterval(fetchMetrics, POLLING_INTERVALS.orderflowMetrics)
-    return () => clearInterval(interval)
-  }, [timeframe])
-
-  const fetchMetrics = async () => {
+  const fetchMetrics = useCallback(async () => {
     try {
       const response = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.metrics}`)
       const data = await response.json()
@@ -47,7 +41,21 @@ export default function OrderFlowMetrics({ timeframe }: OrderFlowMetricsProps) {
       setMetrics(getSampleMetrics())
       setLoading(false)
     }
-  }
+  }, [])
+
+  // Subscribe to WebSocket - refresh metrics on bar close
+  useWebSocket({
+    timeframe,
+    symbol: SYMBOL_CONFIG.backendSymbol,
+    onBarClose: fetchMetrics,
+  })
+
+  useEffect(() => {
+    fetchMetrics()
+    // Keep polling as fallback (longer interval since WebSocket handles real-time)
+    const interval = setInterval(fetchMetrics, POLLING_INTERVALS.orderflowMetrics * 5)
+    return () => clearInterval(interval)
+  }, [timeframe, fetchMetrics])
 
   if (loading || !metrics) {
     return (

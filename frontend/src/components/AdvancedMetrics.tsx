@@ -1,14 +1,16 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import './AdvancedMetrics.css'
 import {
   API_CONFIG,
   COLORS,
   POLLING_INTERVALS,
   THRESHOLDS,
+  SYMBOL_CONFIG,
   getBiasColor,
   getAlertColor,
   getToxicityColor,
 } from '../config'
+import { useWebSocket } from '../hooks/useWebSocket'
 
 interface RVOLData {
   rvol: number
@@ -62,13 +64,7 @@ export default function AdvancedMetricsPanel({ timeframe }: AdvancedMetricsProps
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    fetchMetrics()
-    const interval = setInterval(fetchMetrics, POLLING_INTERVALS.advancedMetrics)
-    return () => clearInterval(interval)
-  }, [timeframe])
-
-  const fetchMetrics = async () => {
+  const fetchMetrics = useCallback(async () => {
     try {
       const response = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.advancedMetrics}/${timeframe}`)
       if (!response.ok) {
@@ -83,7 +79,21 @@ export default function AdvancedMetricsPanel({ timeframe }: AdvancedMetricsProps
       setError('Unable to load metrics')
       setLoading(false)
     }
-  }
+  }, [timeframe])
+
+  // Subscribe to WebSocket - refresh metrics on bar close
+  useWebSocket({
+    timeframe,
+    symbol: SYMBOL_CONFIG.backendSymbol,
+    onBarClose: fetchMetrics,
+  })
+
+  useEffect(() => {
+    fetchMetrics()
+    // Keep polling as fallback (longer interval since WebSocket handles real-time)
+    const interval = setInterval(fetchMetrics, POLLING_INTERVALS.advancedMetrics * 3)
+    return () => clearInterval(interval)
+  }, [timeframe, fetchMetrics])
 
   const getConvictionBadge = (conviction: string) => {
     const colors: Record<string, string> = {
