@@ -358,8 +358,8 @@ class LiveDataIngestion:
             delta = self.calculate_delta_from_quote(quote, prev_quote)
             self.prev_quotes[symbol] = quote
 
-            # Convert timestamp
-            tick_ts = datetime.fromtimestamp(quote['ts_event'] / 1e9)
+            # Convert timestamp (use UTC timezone so it serializes with +00:00 suffix)
+            tick_ts = datetime.fromtimestamp(quote['ts_event'] / 1e9, tz=timezone.utc)
 
             # Update bars for each timeframe
             for tf in self.timeframes:

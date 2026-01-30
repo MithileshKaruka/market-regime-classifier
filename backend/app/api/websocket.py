@@ -11,6 +11,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def json_serial(obj):
+    """JSON serializer for objects not serializable by default json code"""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    return str(obj)
+
+
 class ConnectionManager:
     """Manages WebSocket connections and broadcasts updates"""
 
@@ -52,7 +59,7 @@ class ConnectionManager:
         if not self.all_connections:
             return
 
-        data = json.dumps(message, default=str)
+        data = json.dumps(message, default=json_serial)
         disconnected = set()
 
         for connection in self.all_connections:
@@ -71,7 +78,7 @@ class ConnectionManager:
         if not connections:
             return
 
-        data = json.dumps(message, default=str)
+        data = json.dumps(message, default=json_serial)
         disconnected = set()
 
         for connection in connections:

@@ -104,32 +104,26 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
   // Timezone Adjustment Helpers
   // ============================================================================
 
-  // Adjust UTC Unix timestamp (seconds) to display as Chicago time on chart
-  // lightweight-charts interprets timestamps as local time, so we shift the timestamp
-  const adjustToChicago = useCallback((utcTimestamp: number): number => {
-    const utcMs = utcTimestamp * 1000
-    const date = new Date(utcMs)
-    // Get Chicago time string and parse it back to get the offset
-    const chicagoStr = date.toLocaleString('en-US', { timeZone: CHART_CONFIG.timezone })
-    const utcStr = date.toLocaleString('en-US', { timeZone: 'UTC' })
-    const chicagoDate = new Date(chicagoStr)
-    const utcDate = new Date(utcStr)
-    // Calculate offset in ms (Chicago is behind UTC, so offset is negative)
-    const offsetMs = chicagoDate.getTime() - utcDate.getTime()
-    // Return adjusted timestamp
-    return Math.floor((utcMs + offsetMs) / 1000)
+  // Adjust UTC timestamp to browser's local time for chart display
+  // lightweight-charts displays timestamps as-is, so we shift to local time
+  const adjustToLocal = useCallback((utcTimestamp: number): number => {
+    const date = new Date(utcTimestamp * 1000)
+    // getTimezoneOffset() returns minutes AHEAD of UTC (so CST=-360 becomes +360)
+    // We subtract to shift from UTC to local
+    const offsetMinutes = date.getTimezoneOffset()
+    return utcTimestamp - (offsetMinutes * 60)
   }, [])
 
   // ============================================================================
   // WebSocket Real-time Updates
   // ============================================================================
 
-  // Convert ISO timestamp to Unix seconds for lightweight-charts (Chicago timezone)
+  // Convert ISO timestamp to Unix seconds for lightweight-charts (local timezone)
   const parseTimestamp = useCallback((isoString: string): number => {
     const date = new Date(isoString)
     const utcSeconds = Math.floor(date.getTime() / 1000)
-    return adjustToChicago(utcSeconds)
-  }, [adjustToChicago])
+    return adjustToLocal(utcSeconds)
+  }, [adjustToLocal])
 
   // Handle real-time bar updates from WebSocket
   const handleBarUpdate = useCallback((data: BarData) => {
@@ -357,7 +351,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
 
     // Prepare candlestick data (adjust timestamp to Chicago timezone)
     const candlestickData = sortedBars.map((bar) => ({
-      time: adjustToChicago(bar.time) as any,
+      time: adjustToLocal(bar.time) as any,
       open: bar.open,
       high: bar.high,
       low: bar.low,
@@ -366,7 +360,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
 
     // Prepare volume data (adjust timestamp to Chicago timezone)
     const volumeData = sortedBars.map((bar) => ({
-      time: adjustToChicago(bar.time) as any,
+      time: adjustToLocal(bar.time) as any,
       value: bar.volume,
       color: bar.close >= bar.open ? COLORS.chart.volumeUp : COLORS.chart.volumeDown,
     }))
@@ -381,13 +375,13 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
         const data = sortedBars
           .filter(bar => (bar as any)[key] != null)
           .map(bar => ({
-            time: adjustToChicago(bar.time) as any,
+            time: adjustToLocal(bar.time) as any,
             value: (bar as any)[key],
           }))
         series.setData(data)
       }
     })
-  }, [adjustToChicago])
+  }, [adjustToLocal])
 
   // Load more historical data (uses refs to avoid stale closure issues)
   const loadMoreData = async () => {
@@ -546,7 +540,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
             }
 
             return {
-              time: adjustToChicago(signal.timestamp) as any,
+              time: adjustToLocal(signal.timestamp) as any,
               position: position,
               color: color,
               shape: shape,
@@ -759,7 +753,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
       }
 
       return {
-        time: adjustToChicago(signal.timestamp) as any,
+        time: adjustToLocal(signal.timestamp) as any,
         position: position,
         color: color,
         shape: shape,
@@ -773,7 +767,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
 
     candlestickSeriesRef.current.setMarkers(markers as any)
     console.log(`[Orderflow] Applied ${markers.length} markers to chart`)
-  }, [orderflowSignals, showOrderflowSignals, adjustToChicago])
+  }, [orderflowSignals, showOrderflowSignals, adjustToLocal])
 
   return (
     <div

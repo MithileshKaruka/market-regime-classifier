@@ -4,7 +4,6 @@ import ChartView from './components/ChartView'
 import RegimePanel from './components/RegimePanel'
 import OrderFlowMetrics from './components/OrderFlowMetrics'
 import AdvancedMetricsPanel from './components/AdvancedMetrics'
-import AgentPanel from './components/AgentPanel'
 import ConnectionStatus from './components/ConnectionStatus'
 import { TIMEFRAMES, DEFAULT_TIMEFRAME, LABELS, type Timeframe } from './config'
 import { useWebSocketStore } from './stores/webSocketStore'
@@ -48,10 +47,6 @@ function App() {
 
         <div className="regime-container">
           <RegimePanel />
-        </div>
-
-        <div className="agent-container">
-          <AgentPanel timeframe={selectedTimeframe} />
         </div>
       </main>
     </div>

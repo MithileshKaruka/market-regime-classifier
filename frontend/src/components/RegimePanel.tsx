@@ -60,8 +60,16 @@ interface OrderflowSignal {
   details: string
 }
 
+interface AgentDecision {
+  action: string
+  action_reason: string
+  stop_loss: number | null
+  take_profit: number | null
+}
+
 export default function RegimePanel() {
   const [agentBias, setAgentBias] = useState<AgentBias | null>(null)
+  const [agentDecision, setAgentDecision] = useState<AgentDecision | null>(null)
   const [recentSignals, setRecentSignals] = useState<OrderflowSignal[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedTimeframe, setSelectedTimeframe] = useState('15M')
@@ -74,15 +82,23 @@ export default function RegimePanel() {
 
   const fetchData = async () => {
     try {
-      // Fetch Agent Bias Score
-      const biasResponse = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.agentBias}/${selectedTimeframe}`)
+      // Fetch Agent Bias Score, Agent Decision, and recent signals in parallel
+      const [biasResponse, decisionResponse, signalsResponse] = await Promise.all([
+        fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.agentBias}/${selectedTimeframe}`),
+        fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.agentDecision}/${selectedTimeframe}?position=FLAT`),
+        fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.orderflowSignals}/${selectedTimeframe}?limit=${THRESHOLDS.signals.fetchLimit}`)
+      ])
+
       if (biasResponse.ok) {
         const biasData = await biasResponse.json()
         setAgentBias(biasData)
       }
 
-      // Fetch recent signals
-      const signalsResponse = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.orderflowSignals}/${selectedTimeframe}?limit=${THRESHOLDS.signals.fetchLimit}`)
+      if (decisionResponse.ok) {
+        const decisionData = await decisionResponse.json()
+        setAgentDecision(decisionData)
+      }
+
       if (signalsResponse.ok) {
         const signalsData = await signalsResponse.json()
         const recent = (signalsData.signals || []).slice(-THRESHOLDS.signals.recentCount).reverse()
@@ -131,6 +147,13 @@ export default function RegimePanel() {
       case 'MEDIUM': return '#f59e0b'
       default: return COLORS.bearish
     }
+  }
+
+  const getActionColor = (action: string): string => {
+    if (action.includes('LONG') && !action.includes('EXIT')) return COLORS.bullishLight
+    if (action.includes('SHORT') && !action.includes('EXIT')) return COLORS.bearish
+    if (action.includes('EXIT')) return '#f97316'
+    return COLORS.neutral
   }
 
   return (
@@ -196,6 +219,29 @@ export default function RegimePanel() {
           <div className="recommendation">
             {agentBias.recommendation}
           </div>
+
+          {/* Action Card with SL/TP */}
+          {agentDecision && (
+            <div className="action-card" style={{ borderColor: getActionColor(agentDecision.action) }}>
+              <div className="action-label">Recommended Action</div>
+              <div className="action-value" style={{ color: getActionColor(agentDecision.action) }}>
+                {agentDecision.action.replace('_', ' ')}
+              </div>
+              <div className="action-reason">{agentDecision.action_reason}</div>
+              {agentDecision.stop_loss && agentDecision.take_profit && (
+                <div className="trade-levels">
+                  <div className="level stop-loss">
+                    <span>SL</span>
+                    <span>${agentDecision.stop_loss.toFixed(2)}</span>
+                  </div>
+                  <div className="level take-profit">
+                    <span>TP</span>
+                    <span>${agentDecision.take_profit.toFixed(2)}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Component Breakdown */}
           <div className="components-section">

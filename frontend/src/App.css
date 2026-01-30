@@ -85,22 +85,12 @@ body {
 
 .chart-container,
 .metrics-container,
-.regime-container,
-.agent-container {
+.regime-container {
   background-color: var(--bg-secondary);
   border: 1px solid var(--border-color);
   border-radius: 8px;
   padding: 1.5rem;
   overflow: hidden;
-}
-
-.agent-container {
-  padding: 0;
-}
-
-.agent-container .agent-panel {
-  border: none;
-  border-radius: 8px;
 }
 
 .chart-container {
@@ -123,16 +113,12 @@ body {
 
   .metrics-container {
     grid-column: 2;
-    grid-row: 1;
+    grid-row: 1 / 3;
   }
 
   .regime-container {
-    grid-column: 2;
-    grid-row: 2;
-  }
-
-  .agent-container {
     grid-column: 3;
     grid-row: 1 / 3;
+    overflow-y: auto;
   }
 }
