@@ -1027,53 +1027,6 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
               </div>
             )}
           </div>
-          {/* Signal legend - only show selected types */}
-          {showOrderflowSignals && selectedSignalTypes.length > 0 && (
-            <div className="chart-legend">
-              {selectedSignalTypes.includes('Absorption') && (
-                <span className="legend-item" title="Absorption">
-                  <span className="legend-color" style={{ backgroundColor: COLORS.signals.absorption }}></span>
-                  ABS
-                </span>
-              )}
-              {selectedSignalTypes.includes('LSF') && (
-                <span className="legend-item" title="Liquidity Sweep Fade">
-                  <span className="legend-color" style={{ backgroundColor: COLORS.signals.lsf }}></span>
-                  LSF
-                </span>
-              )}
-              {selectedSignalTypes.includes('OB Imb') && (
-                <span className="legend-item" title="Order Book Imbalance">
-                  <span className="legend-color" style={{ backgroundColor: COLORS.signals.obi }}></span>
-                  OBI
-                </span>
-              )}
-              {selectedSignalTypes.includes('Delta Unwind') && (
-                <span className="legend-item" title="Delta Unwind - Reversal after extreme delta">
-                  <span className="legend-color" style={{ backgroundColor: COLORS.signals.deltaUnwind }}></span>
-                  DU
-                </span>
-              )}
-              {selectedSignalTypes.includes('Exhaustion') && (
-                <span className="legend-item" title="Exhaustion - High volume, minimal price movement">
-                  <span className="legend-color" style={{ backgroundColor: COLORS.signals.exhaustion }}></span>
-                  EXH
-                </span>
-              )}
-              {selectedSignalTypes.includes('Institutional') && (
-                <span className="legend-item" title="Institutional - Large trades with directional flow">
-                  <span className="legend-color" style={{ backgroundColor: COLORS.signals.institutional }}></span>
-                  INS
-                </span>
-              )}
-              {selectedSignalTypes.includes('TF Div') && (
-                <span className="legend-item" title="Trade Flow Divergence - Contrarian signal">
-                  <span className="legend-color" style={{ backgroundColor: COLORS.signals.tradeFlowDiv }}></span>
-                  TFD
-                </span>
-              )}
-            </div>
-          )}
           <div style={{ position: 'relative' }}>
             <button
               onClick={() => setShowIndicatorMenu(!showIndicatorMenu)}
