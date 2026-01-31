@@ -28,6 +28,7 @@ backend/data/*.json
 backend/data/archive/
 *.duckdb
 *.duckdb.backup
+*.duckdb.wal
 *.db
 
 # IDE
