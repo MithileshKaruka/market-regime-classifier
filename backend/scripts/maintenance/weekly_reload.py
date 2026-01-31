@@ -35,8 +35,8 @@ import databento as db
 from config import get_secrets
 
 # Configuration
-OHLCV_YEARS = 5       # 5 years of OHLCV data
-MBP_DAYS = 7          # 7 days of MBP-1 data
+OHLCV_YEARS = 1       # 1 year of OHLCV data
+MBP_DAYS = 3          # 3 days of MBP-1 data
 DATASET = "GLBX.MDP3"
 SYMBOL = "MNQ.c.0"    # Continuous front-month contract
 STYPE_IN = "continuous"
@@ -448,14 +448,15 @@ def verify_data_loaded(min_bars: dict = None) -> bool:
     print("  Verifying Data Integrity")
     print("=" * 60)
 
-    # Default minimum bars (approximate for 5 years OHLCV)
+    # Default minimum bars (approximate for configured OHLCV_YEARS)
     if min_bars is None:
+        # Scale based on configured years
         min_bars = {
-            '5M': 100000,    # ~5 years of 5M bars
-            '15M': 30000,    # ~5 years of 15M bars
-            '1H': 8000,      # ~5 years of 1H bars
-            '4H': 2000,      # ~5 years of 4H bars
-            '1D': 500,       # ~5 years of daily bars
+            '5M': int(20000 * OHLCV_YEARS),    # ~20k bars per year
+            '15M': int(6000 * OHLCV_YEARS),    # ~6k bars per year
+            '1H': int(1600 * OHLCV_YEARS),     # ~1.6k bars per year
+            '4H': int(400 * OHLCV_YEARS),      # ~400 bars per year
+            '1D': int(100 * OHLCV_YEARS),      # ~100 bars per year (trading days)
         }
 
     from app.data.storage import DuckDBStorage
@@ -550,6 +551,8 @@ Examples:
                         help='Run full reload (only proceeds if cost is $0)')
     parser.add_argument('--force', action='store_true',
                         help='Force reload even if cost > $0')
+    parser.add_argument('--skip-cost-check', action='store_true',
+                        help='Skip cost estimation (use when API times out)')
     parser.add_argument('--skip-archive-cleanup', action='store_true',
                         help='Skip cleaning archive files')
     parser.add_argument('--keep-backup', action='store_true',
@@ -582,12 +585,19 @@ Examples:
     print(f"  MBP-1: {MBP_DAYS} days")
     print(f"  Max allowed cost: ${MAX_ALLOWED_COST:.2f}")
 
-    # Estimate cost
-    total_cost, cost_details = estimate_cost(api_key, date_ranges)
+    # Skip cost check if requested
+    if args.skip_cost_check:
+        print("\n[SKIP] Cost check skipped (--skip-cost-check)")
+        total_cost = 0.0
+        cost_details = {'ohlcv': 0.0, 'mbp': 0.0}
+    else:
+        # Estimate cost
+        total_cost, cost_details = estimate_cost(api_key, date_ranges)
 
-    if total_cost < 0:
-        print("\n[ERROR] Could not estimate costs. Aborting.")
-        return 1
+        if total_cost < 0:
+            print("\n[ERROR] Could not estimate costs. Aborting.")
+            print("  Use --skip-cost-check to bypass (only if you're sure data is cached)")
+            return 1
 
     # Check only mode
     if args.check:
