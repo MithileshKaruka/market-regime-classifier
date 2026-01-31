@@ -127,6 +127,7 @@ async def get_orderflow_signals(
         # Query pre-aggregated OHLCV data from ohlcv_ticks table
         # This table is pre-computed from mbp_ticks with accurate DOM/delta data
         # Get most recent N bars, then order chronologically for signal detection
+        # Filter out spurious low-volume bars
         df = storage.conn.execute(f"""
             SELECT * FROM (
                 SELECT
@@ -142,6 +143,7 @@ async def get_orderflow_signals(
                     total_ask_depth
                 FROM ohlcv_ticks
                 WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
+                  AND volume > 100
                 ORDER BY timestamp DESC
                 LIMIT {limit}
             ) ORDER BY timestamp ASC
@@ -218,10 +220,12 @@ async def get_simplified_metrics():
 
         for tf in timeframes:
             # Get latest DOM imbalance for each timeframe
+            # Filter out spurious low-volume bars (volume > 100)
             df = storage.conn.execute(f"""
                 SELECT timestamp, dom_imbalance
                 FROM ohlcv_ticks
                 WHERE symbol = 'MNQ' AND timeframe = '{tf}'
+                  AND volume > 100
                 ORDER BY timestamp DESC
                 LIMIT 1
             """).pl()
@@ -253,13 +257,14 @@ async def get_simplified_metrics():
 
         # Calculate daily VWAP from intraday bars (15M for precision)
         # Use today's bars only for true daily VWAP
+        # Filter out spurious low-volume bars
         vwap_df = storage.conn.execute("""
             SELECT
                 SUM((high + low + close) / 3 * volume) / SUM(volume) as vwap,
-                (SELECT close FROM ohlcv_ticks WHERE symbol = 'MNQ' ORDER BY timestamp DESC LIMIT 1) as current_price
+                (SELECT close FROM ohlcv_ticks WHERE symbol = 'MNQ' AND volume > 100 ORDER BY timestamp DESC LIMIT 1) as current_price
             FROM ohlcv_ticks
-            WHERE symbol = 'MNQ' AND timeframe = '15M'
-            AND DATE(timestamp) = (SELECT DATE(MAX(timestamp)) FROM ohlcv_ticks WHERE symbol = 'MNQ' AND timeframe = '15M')
+            WHERE symbol = 'MNQ' AND timeframe = '15M' AND volume > 100
+            AND DATE(timestamp) = (SELECT DATE(MAX(timestamp)) FROM ohlcv_ticks WHERE symbol = 'MNQ' AND timeframe = '15M' AND volume > 100)
         """).pl()
 
         if len(vwap_df) == 0 or vwap_df["vwap"][0] is None:
@@ -267,10 +272,10 @@ async def get_simplified_metrics():
             vwap_df = storage.conn.execute("""
                 SELECT
                     SUM((high + low + close) / 3 * volume) / SUM(volume) as vwap,
-                    (SELECT close FROM ohlcv_ticks WHERE symbol = 'MNQ' ORDER BY timestamp DESC LIMIT 1) as current_price
+                    (SELECT close FROM ohlcv_ticks WHERE symbol = 'MNQ' AND volume > 100 ORDER BY timestamp DESC LIMIT 1) as current_price
                 FROM ohlcv_ticks
-                WHERE symbol = 'MNQ' AND timeframe = '1H'
-                AND DATE(timestamp) = (SELECT DATE(MAX(timestamp)) FROM ohlcv_ticks WHERE symbol = 'MNQ' AND timeframe = '1H')
+                WHERE symbol = 'MNQ' AND timeframe = '1H' AND volume > 100
+                AND DATE(timestamp) = (SELECT DATE(MAX(timestamp)) FROM ohlcv_ticks WHERE symbol = 'MNQ' AND timeframe = '1H' AND volume > 100)
             """).pl()
 
         if len(vwap_df) > 0 and vwap_df["vwap"][0] is not None:
@@ -330,6 +335,7 @@ async def get_advanced_metrics(
     """
     with DuckDBStorage() as storage:
         # Get OHLCV + orderflow data (most recent N bars, ordered chronologically)
+        # Filter out spurious low-volume bars
         df = storage.conn.execute(f"""
             SELECT * FROM (
                 SELECT
@@ -343,6 +349,7 @@ async def get_advanced_metrics(
                     cvd as instant_delta
                 FROM ohlcv_ticks
                 WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
+                  AND volume > 100
                 ORDER BY timestamp DESC
                 LIMIT {limit}
             ) ORDER BY timestamp ASC
@@ -504,6 +511,7 @@ async def get_agent_bias(
     """
     with DuckDBStorage() as storage:
         # Get OHLCV data with indicators (most recent N bars, ordered chronologically)
+        # Filter out spurious low-volume bars
         df = storage.conn.execute(f"""
             SELECT * FROM (
                 SELECT
@@ -517,6 +525,7 @@ async def get_agent_bias(
                     cvd as instant_delta
                 FROM ohlcv_ticks
                 WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
+                  AND volume > 100
                 ORDER BY timestamp DESC
                 LIMIT {limit}
             ) ORDER BY timestamp ASC

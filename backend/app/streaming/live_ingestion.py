@@ -546,6 +546,12 @@ class LiveDataIngestion:
     async def _store_completed_bar(self, timeframe: str, symbol: str, bar: dict):
         """Store a completed bar to the database"""
         try:
+            # Skip bars with very low volume (spurious bars at market boundaries)
+            # Minimum volume threshold: 10 ticks to be considered valid
+            if bar.get('volume', 0) < 10:
+                logger.debug(f"Skipping low-volume bar: {timeframe}:{symbol} volume={bar.get('volume')}")
+                return
+
             # Normalize symbol for storage (MNQH26/MNQ.FUT -> MNQ for consistency with historical)
             db_symbol = normalize_symbol(symbol)
 

@@ -207,15 +207,17 @@ orderflow_alpha:
   # Institutional Activity detection (from trades data)
   # Detects large trades (>=50 contracts) with directional flow
   # Indicates institutional accumulation/distribution
-  inst_large_trade_min: 3         # Min large trades per bar to trigger signal
-  inst_flow_threshold: 0.65       # Trade flow ratio threshold (>0.65 bullish, <0.35 bearish)
+  # Backtested 5M: 71.4% hit rate, 2.71 PF at large_min=1, flow=0.55
+  inst_large_trade_min: 1         # Min large trades per bar to trigger signal
+  inst_flow_threshold: 0.55       # Trade flow ratio threshold (>0.55 bullish, <0.45 bearish)
 
   # Trade Flow Divergence detection (from trades data)
   # Detects when trade flow diverges from price direction (contrarian signal)
-  # Example: price falling but >60% buys = bullish divergence (hidden accumulation)
-  tfd_flow_threshold: 0.60        # Trade flow ratio threshold for divergence
-  tfd_price_change_pct: 0.002     # Min price change (0.2%) to consider directional
-  tfd_lookback_bars: 5            # Bars to measure price change over
+  # Example: price falling but >55% buys = bullish divergence (hidden accumulation)
+  # Backtested 5M: 70.0% hit rate, 5.64 PF at flow=0.55, price=0.15%, lookback=3
+  tfd_flow_threshold: 0.55        # Trade flow ratio threshold for divergence
+  tfd_price_change_pct: 0.0015    # Min price change (0.15%) to consider directional
+  tfd_lookback_bars: 3            # Bars to measure price change over
 
 # =============================================================================
 # RISK MANAGEMENT

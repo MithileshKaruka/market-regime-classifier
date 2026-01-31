@@ -450,6 +450,8 @@ def download_and_load_mbp_chunked(api_key: str, start_date: str, end_date: str, 
         "5M": "5m",
         "15M": "15m",
         "1H": "1h",
+        "4H": "4h",
+        "1D": "1d",
     }
 
     with DuckDBStorage() as storage:
@@ -572,7 +574,7 @@ def download_and_load_mbp_chunked(api_key: str, start_date: str, end_date: str, 
             gc.collect()
 
         print(f"\n  Total bars created: {total_bars}")
-        print("  Note: 4H and 1D bars need post-processing for cross-day CVD")
+        print("  Note: CVD is calculated per-chunk; cross-day CVD continuity requires post-processing")
         print("  Done!")
 
 
