@@ -540,11 +540,15 @@ def download_and_load_mbp_chunked(api_key: str, start_date: str, end_date: str, 
                         ((pl.col("high") - pl.col("low")) / pl.col("close") < 0.03)
                     )
 
-                    # Reorder columns to match table schema
+                    # Reorder columns to match table schema (including trade flow columns as NULL)
                     df_insert = df_agg.select([
                         "timestamp", "symbol", "timeframe", "open", "high", "low", "close",
                         "volume", "instant_delta", "dom_imbalance", "total_bid_depth",
-                        "total_ask_depth", "cvd"
+                        "total_ask_depth", "cvd",
+                        pl.lit(None).cast(pl.Float64).alias("trade_flow_ratio"),
+                        pl.lit(None).cast(pl.Int32).alias("buy_trades"),
+                        pl.lit(None).cast(pl.Int32).alias("sell_trades"),
+                        pl.lit(None).cast(pl.Int32).alias("large_trade_count"),
                     ])
 
                     if len(df_insert) > 0:
