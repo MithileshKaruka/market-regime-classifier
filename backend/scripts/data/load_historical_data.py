@@ -283,6 +283,10 @@ def insert_ohlcv_data(storage, df: pl.DataFrame, timeframe: str, with_orderflow:
             pl.lit(None).cast(pl.Float64).alias("total_bid_depth"),
             pl.lit(None).cast(pl.Float64).alias("total_ask_depth"),
             pl.lit(None).cast(pl.Int64).alias("cvd"),
+            pl.lit(None).cast(pl.Float64).alias("trade_flow_ratio"),
+            pl.lit(None).cast(pl.Int32).alias("buy_trades"),
+            pl.lit(None).cast(pl.Int32).alias("sell_trades"),
+            pl.lit(None).cast(pl.Int32).alias("large_trade_count"),
         ])
 
     storage.conn.execute("INSERT OR REPLACE INTO ohlcv_ticks SELECT * FROM df_insert")
@@ -386,7 +390,11 @@ def aggregate_mbp_to_ohlcv(storage):
                     SUM(instant_delta) OVER (
                         ORDER BY timestamp
                         ROWS BETWEEN {cvd_window - 1} PRECEDING AND CURRENT ROW
-                    ) as cvd
+                    ) as cvd,
+                    NULL as trade_flow_ratio,
+                    NULL as buy_trades,
+                    NULL as sell_trades,
+                    NULL as large_trade_count
                 FROM bars
                 ORDER BY timestamp
             """)
@@ -440,7 +448,11 @@ def aggregate_mbp_to_ohlcv(storage):
                     SUM(instant_delta) OVER (
                         ORDER BY timestamp
                         ROWS BETWEEN {cvd_window - 1} PRECEDING AND CURRENT ROW
-                    ) as cvd
+                    ) as cvd,
+                    NULL as trade_flow_ratio,
+                    NULL as buy_trades,
+                    NULL as sell_trades,
+                    NULL as large_trade_count
                 FROM bars
                 ORDER BY timestamp
             """)

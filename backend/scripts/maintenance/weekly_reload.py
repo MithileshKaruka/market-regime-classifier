@@ -339,6 +339,10 @@ def reset_database():
                 total_bid_depth DOUBLE,
                 total_ask_depth DOUBLE,
                 cvd BIGINT,
+                trade_flow_ratio DOUBLE,
+                buy_trades INTEGER,
+                sell_trades INTEGER,
+                large_trade_count INTEGER,
                 PRIMARY KEY (timestamp, symbol, timeframe)
             )
         """)
