@@ -17,6 +17,8 @@ class SignalType(str, Enum):
     OBI = "OB Imb"  # Order Book Imbalance
     DELTA_UNWIND = "Delta Unwind"  # Cumulative delta reversal
     EXHAUSTION = "Exhaustion"  # High volume, low range
+    INSTITUTIONAL = "Institutional"  # Large trades with directional flow
+    TRADE_FLOW_DIV = "TF Div"  # Trade flow diverges from price
 
 
 class SignalDirection(str, Enum):
@@ -68,6 +70,13 @@ class OrderflowSignalDetector:
         # Exhaustion params
         exhaustion_volume_mult: Optional[float] = None,
         exhaustion_range_ratio_max: Optional[float] = None,
+        # Institutional Activity params (trades data)
+        inst_large_trade_min: Optional[int] = None,
+        inst_flow_threshold: Optional[float] = None,
+        # Trade Flow Divergence params (trades data)
+        tfd_flow_threshold: Optional[float] = None,
+        tfd_price_change_pct: Optional[float] = None,
+        tfd_lookback_bars: Optional[int] = None,
         # General
         lookback_bars: Optional[int] = None,
     ):
@@ -108,6 +117,17 @@ class OrderflowSignalDetector:
         # Exhaustion params
         self.exhaustion_volume_mult = exhaustion_volume_mult or getattr(of_config, 'exhaustion_volume_mult', 1.5)
         self.exhaustion_range_ratio_max = exhaustion_range_ratio_max or getattr(of_config, 'exhaustion_range_ratio_max', 0.5)
+
+        # Institutional Activity params (from trades data)
+        # Detects large trades with directional flow (accumulation/distribution)
+        self.inst_large_trade_min = inst_large_trade_min or getattr(of_config, 'inst_large_trade_min', 3)
+        self.inst_flow_threshold = inst_flow_threshold or getattr(of_config, 'inst_flow_threshold', 0.65)
+
+        # Trade Flow Divergence params (from trades data)
+        # Detects when trade flow diverges from price direction (contrarian signal)
+        self.tfd_flow_threshold = tfd_flow_threshold or getattr(of_config, 'tfd_flow_threshold', 0.60)
+        self.tfd_price_change_pct = tfd_price_change_pct or getattr(of_config, 'tfd_price_change_pct', 0.002)
+        self.tfd_lookback_bars = tfd_lookback_bars or getattr(of_config, 'tfd_lookback_bars', 5)
 
         self.timeframe = timeframe
 
@@ -600,6 +620,138 @@ class OrderflowSignalDetector:
         logger.info(f"Detected {len(signals)} Exhaustion signals")
         return signals
 
+    def detect_institutional(self, df: pl.DataFrame) -> List[OrderflowSignal]:
+        """Detect Institutional Activity signals from trades data
+
+        Institutional Activity: Multiple large trades (>=50 contracts) with
+        directional trade flow indicates institutional accumulation/distribution.
+
+        Signal Logic:
+        - Large trade count >= threshold (default 3)
+        - Trade flow ratio strongly directional (>0.65 bullish, <0.35 bearish)
+        - Indicates "smart money" activity in a direction
+
+        Args:
+            df: DataFrame with columns: timestamp, close, large_trade_count, trade_flow_ratio
+
+        Returns:
+            List of Institutional signals
+        """
+        signals = []
+
+        # Check for required columns (from trades data)
+        if "large_trade_count" not in df.columns or "trade_flow_ratio" not in df.columns:
+            logger.debug("Institutional detection requires large_trade_count and trade_flow_ratio columns (from trades data)")
+            return signals
+
+        for row in df.iter_rows(named=True):
+            large_count = row.get("large_trade_count")
+            flow_ratio = row.get("trade_flow_ratio")
+
+            # Skip if no trade data for this bar
+            if large_count is None or flow_ratio is None:
+                continue
+
+            # Check for significant institutional activity
+            if large_count < self.inst_large_trade_min:
+                continue
+
+            # Determine direction from trade flow
+            if flow_ratio > self.inst_flow_threshold:
+                # Strong buy flow with institutional trades = bullish accumulation
+                direction = SignalDirection.BULLISH
+                strength = min(1.0, (flow_ratio - 0.5) * 2 * (large_count / self.inst_large_trade_min) / 2)
+                details = f"Institutional BUY: {large_count} large trades, {flow_ratio:.0%} buy flow"
+
+            elif flow_ratio < (1 - self.inst_flow_threshold):
+                # Strong sell flow with institutional trades = bearish distribution
+                direction = SignalDirection.BEARISH
+                strength = min(1.0, (0.5 - flow_ratio) * 2 * (large_count / self.inst_large_trade_min) / 2)
+                details = f"Institutional SELL: {large_count} large trades, {1-flow_ratio:.0%} sell flow"
+
+            else:
+                continue  # Trade flow not directional enough
+
+            signals.append(OrderflowSignal(
+                timestamp=int(row["timestamp"].timestamp()) if hasattr(row["timestamp"], "timestamp") else row["timestamp"],
+                signal_type=SignalType.INSTITUTIONAL,
+                direction=direction,
+                price=row.get("close", 0),
+                strength=strength,
+                details=details,
+            ))
+
+        logger.info(f"Detected {len(signals)} Institutional signals")
+        return signals
+
+    def detect_trade_flow_divergence(self, df: pl.DataFrame) -> List[OrderflowSignal]:
+        """Detect Trade Flow Divergence signals from trades data
+
+        Trade Flow Divergence: When trade flow (buy/sell ratio) diverges from
+        price direction, it's a contrarian signal indicating hidden accumulation
+        or distribution.
+
+        Signal Logic:
+        - Price falling (negative change over lookback) but trade_flow_ratio > threshold
+          = Bullish divergence (accumulation despite falling price)
+        - Price rising (positive change over lookback) but trade_flow_ratio < 1-threshold
+          = Bearish divergence (distribution despite rising price)
+
+        Args:
+            df: DataFrame with columns: timestamp, close, trade_flow_ratio
+
+        Returns:
+            List of Trade Flow Divergence signals
+        """
+        signals = []
+
+        if "trade_flow_ratio" not in df.columns:
+            logger.debug("Trade Flow Divergence requires trade_flow_ratio column (from trades data)")
+            return signals
+
+        if len(df) < self.tfd_lookback_bars + 1:
+            return signals
+
+        # Calculate price change over lookback period
+        df = df.with_columns([
+            ((pl.col("close") - pl.col("close").shift(self.tfd_lookback_bars)) / pl.col("close").shift(self.tfd_lookback_bars)).alias("price_change_pct"),
+        ])
+
+        for row in df.iter_rows(named=True):
+            flow_ratio = row.get("trade_flow_ratio")
+            price_change = row.get("price_change_pct")
+
+            # Skip if no data
+            if flow_ratio is None or price_change is None:
+                continue
+
+            # Bullish divergence: price falling but buyers dominating
+            if price_change < -self.tfd_price_change_pct and flow_ratio > self.tfd_flow_threshold:
+                strength = min(1.0, (flow_ratio - 0.5) * 2 * abs(price_change) / self.tfd_price_change_pct / 2)
+                signals.append(OrderflowSignal(
+                    timestamp=int(row["timestamp"].timestamp()) if hasattr(row["timestamp"], "timestamp") else row["timestamp"],
+                    signal_type=SignalType.TRADE_FLOW_DIV,
+                    direction=SignalDirection.BULLISH,
+                    price=row.get("close", 0),
+                    strength=strength,
+                    details=f"Bullish divergence: price {price_change*100:+.2f}% but {flow_ratio:.0%} buy flow",
+                ))
+
+            # Bearish divergence: price rising but sellers dominating
+            elif price_change > self.tfd_price_change_pct and flow_ratio < (1 - self.tfd_flow_threshold):
+                strength = min(1.0, (0.5 - flow_ratio) * 2 * abs(price_change) / self.tfd_price_change_pct / 2)
+                signals.append(OrderflowSignal(
+                    timestamp=int(row["timestamp"].timestamp()) if hasattr(row["timestamp"], "timestamp") else row["timestamp"],
+                    signal_type=SignalType.TRADE_FLOW_DIV,
+                    direction=SignalDirection.BEARISH,
+                    price=row.get("close", 0),
+                    strength=strength,
+                    details=f"Bearish divergence: price {price_change*100:+.2f}% but {1-flow_ratio:.0%} sell flow",
+                ))
+
+        logger.info(f"Detected {len(signals)} Trade Flow Divergence signals")
+        return signals
+
     def detect_all_signals(
         self,
         df: pl.DataFrame,
@@ -608,6 +760,8 @@ class OrderflowSignalDetector:
         detect_obi: bool = True,
         detect_delta_unwind: bool = True,
         detect_exhaustion: bool = True,
+        detect_institutional: bool = True,
+        detect_trade_flow_div: bool = True,
     ) -> List[OrderflowSignal]:
         """Detect all orderflow signals
 
@@ -618,6 +772,8 @@ class OrderflowSignalDetector:
             detect_obi: Whether to detect OBI signals
             detect_delta_unwind: Whether to detect delta unwind signals
             detect_exhaustion: Whether to detect exhaustion signals
+            detect_institutional: Whether to detect institutional activity (requires trades data)
+            detect_trade_flow_div: Whether to detect trade flow divergence (requires trades data)
 
         Returns:
             List of all detected signals, sorted by timestamp
@@ -638,6 +794,13 @@ class OrderflowSignalDetector:
 
         if detect_exhaustion:
             all_signals.extend(self.detect_exhaustion(df))
+
+        # Trades-based signals (require trade_flow_ratio, large_trade_count columns)
+        if detect_institutional:
+            all_signals.extend(self.detect_institutional(df))
+
+        if detect_trade_flow_div:
+            all_signals.extend(self.detect_trade_flow_divergence(df))
 
         # Sort by timestamp
         all_signals.sort(key=lambda s: s.timestamp)

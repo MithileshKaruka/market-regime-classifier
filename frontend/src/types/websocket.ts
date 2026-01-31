@@ -44,7 +44,7 @@ export interface LargeTradeData {
 
 export interface SignalData {
   timestamp: number
-  signal_type: 'Absorption' | 'LSF' | 'OB Imb' | 'Delta Unwind' | 'Exhaustion'
+  signal_type: 'Absorption' | 'LSF' | 'OB Imb' | 'Delta Unwind' | 'Exhaustion' | 'Institutional' | 'TF Div'
   direction: 'BULLISH' | 'BEARISH'
   price: number
   strength: number

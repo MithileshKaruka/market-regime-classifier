@@ -79,6 +79,10 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
   const [isDarkBackground, setIsDarkBackground] = useState(true)
   const [showOrderflowSignals, setShowOrderflowSignals] = useState(true)
   const [orderflowSignals, setOrderflowSignals] = useState<OrderflowSignal[]>([])
+  const [selectedSignalTypes, setSelectedSignalTypes] = useState<string[]>([
+    'Absorption', 'LSF', 'OB Imb', 'Delta Unwind', 'Exhaustion', 'Institutional', 'TF Div'
+  ])
+  const [showSignalMenu, setShowSignalMenu] = useState(false)
   const chartViewRef = useRef<HTMLDivElement>(null)
 
   // Lazy loading state
@@ -719,14 +723,15 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
   useEffect(() => {
     if (!candlestickSeriesRef.current) return
 
-    if (!showOrderflowSignals || orderflowSignals.length === 0) {
-      // Clear markers when toggled off or no signals
+    if (!showOrderflowSignals || orderflowSignals.length === 0 || selectedSignalTypes.length === 0) {
+      // Clear markers when toggled off, no signals, or no types selected
       candlestickSeriesRef.current.setMarkers([])
       return
     }
 
-    // Convert signals to chart markers
-    const markers = orderflowSignals.map(signal => {
+    // Filter signals by selected types and convert to chart markers
+    const filteredSignals = orderflowSignals.filter(s => selectedSignalTypes.includes(s.signal_type))
+    const markers = filteredSignals.map(signal => {
       // Determine marker appearance based on signal type and direction
       let shape: 'arrowUp' | 'arrowDown' | 'circle' | 'square' = 'circle'
       let color = '#ffffff'
@@ -769,6 +774,20 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
         shape = signal.direction === 'BULLISH' ? 'arrowUp' : 'arrowDown'
         color = COLORS.signals.exhaustion
         position = signal.direction === 'BULLISH' ? 'belowBar' : 'aboveBar'
+      } else if (signal.signal_type === 'Institutional') {
+        // Institutional: Large trades with directional flow (from trades data)
+        // Indicates smart money accumulation/distribution
+        text = 'INS'
+        shape = signal.direction === 'BULLISH' ? 'arrowUp' : 'arrowDown'
+        color = COLORS.signals.institutional
+        position = signal.direction === 'BULLISH' ? 'belowBar' : 'aboveBar'
+      } else if (signal.signal_type === 'TF Div') {
+        // Trade Flow Divergence: Trade flow diverges from price (from trades data)
+        // Contrarian signal - hidden accumulation/distribution
+        text = 'TFD'
+        shape = signal.direction === 'BULLISH' ? 'arrowUp' : 'arrowDown'
+        color = COLORS.signals.tradeFlowDiv
+        position = signal.direction === 'BULLISH' ? 'belowBar' : 'aboveBar'
       }
 
       return {
@@ -785,8 +804,8 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
     markers.sort((a, b) => (a.time as number) - (b.time as number))
 
     candlestickSeriesRef.current.setMarkers(markers as any)
-    console.log(`[Orderflow] Applied ${markers.length} markers to chart`)
-  }, [orderflowSignals, showOrderflowSignals, adjustToLocal])
+    console.log(`[Orderflow] Applied ${markers.length} markers to chart (${selectedSignalTypes.length} types selected)`)
+  }, [orderflowSignals, showOrderflowSignals, selectedSignalTypes, adjustToLocal])
 
   return (
     <div
@@ -865,44 +884,196 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
           >
             {isFullscreen ? '⛶ Exit' : '⛶ Fullscreen'}
           </button>
-          <button
-            onClick={() => setShowOrderflowSignals(!showOrderflowSignals)}
-            style={{
-              padding: '4px 12px',
-              borderRadius: '4px',
-              border: showOrderflowSignals ? `1px solid ${COLORS.border.active}` : `1px solid ${COLORS.border.light}`,
-              background: showOrderflowSignals ? COLORS.background.buttonHover : COLORS.background.button,
-              color: showOrderflowSignals ? COLORS.text.white : COLORS.text.secondary,
-              cursor: 'pointer',
-              fontSize: '12px',
-              fontWeight: showOrderflowSignals ? 600 : 400,
-            }}
-            title="Toggle orderflow signals (Absorption, LSF, OBI, Delta Unwind, Exhaustion)"
-          >
-            Signals {orderflowSignals.length > 0 ? `(${orderflowSignals.length})` : ''}
-          </button>
-          <div className="chart-legend">
-            <span className="legend-item" title="Absorption">
-              <span className="legend-color" style={{ backgroundColor: COLORS.signals.absorption }}></span>
-              {LABELS.signals.absorption.slice(0, 3)}
-            </span>
-            <span className="legend-item" title="Liquidity Sweep Fade">
-              <span className="legend-color" style={{ backgroundColor: COLORS.signals.lsf }}></span>
-              {LABELS.signals.lsf}
-            </span>
-            <span className="legend-item" title="Order Book Imbalance (green=bid heavy, red=ask heavy)">
-              <span className="legend-color" style={{ backgroundColor: COLORS.signals.absorption }}></span>
-              {LABELS.signals.obi}
-            </span>
-            <span className="legend-item" title="Delta Unwind - Reversal after extreme delta">
-              <span className="legend-color" style={{ backgroundColor: COLORS.signals.deltaUnwind }}></span>
-              DU
-            </span>
-            <span className="legend-item" title="Exhaustion - High volume, minimal price movement">
-              <span className="legend-color" style={{ backgroundColor: COLORS.signals.exhaustion }}></span>
-              EXH
-            </span>
+          <div style={{ position: 'relative' }}>
+            <button
+              onClick={() => setShowSignalMenu(!showSignalMenu)}
+              style={{
+                padding: '4px 12px',
+                borderRadius: '4px',
+                border: showOrderflowSignals && selectedSignalTypes.length > 0 ? `1px solid ${COLORS.border.active}` : `1px solid ${COLORS.border.light}`,
+                background: showOrderflowSignals && selectedSignalTypes.length > 0 ? COLORS.background.buttonHover : COLORS.background.button,
+                color: showOrderflowSignals && selectedSignalTypes.length > 0 ? COLORS.text.white : COLORS.text.secondary,
+                cursor: 'pointer',
+                fontSize: '12px',
+                fontWeight: showOrderflowSignals && selectedSignalTypes.length > 0 ? 600 : 400,
+              }}
+              title="Select orderflow signal types to display"
+            >
+              Signals ({selectedSignalTypes.length}/{orderflowSignals.filter(s => selectedSignalTypes.includes(s.signal_type)).length})
+            </button>
+            {showSignalMenu && (
+              <div style={{
+                position: 'absolute',
+                top: '100%',
+                right: 0,
+                marginTop: '4px',
+                background: COLORS.background.button,
+                border: `1px solid ${COLORS.border.light}`,
+                borderRadius: '4px',
+                padding: '8px',
+                minWidth: '200px',
+                zIndex: 1000,
+                boxShadow: '0 4px 6px rgba(0, 0, 0, 0.3)'
+              }}>
+                {/* Master toggle */}
+                <div style={{
+                  borderBottom: `1px solid ${COLORS.border.light}`,
+                  paddingBottom: '8px',
+                  marginBottom: '8px'
+                }}>
+                  <label style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    padding: '4px 8px',
+                    cursor: 'pointer',
+                    fontSize: '12px',
+                    color: COLORS.text.primary,
+                    gap: '8px',
+                    fontWeight: 600
+                  }}>
+                    <input
+                      type="checkbox"
+                      checked={showOrderflowSignals}
+                      onChange={() => setShowOrderflowSignals(!showOrderflowSignals)}
+                      style={{ cursor: 'pointer' }}
+                    />
+                    Show Signals
+                  </label>
+                </div>
+                {/* Signal type checkboxes */}
+                {[
+                  { type: 'Absorption', label: 'Absorption', color: COLORS.signals.absorption, abbrev: 'ABS' },
+                  { type: 'LSF', label: 'Liquidity Sweep Fade', color: COLORS.signals.lsf, abbrev: 'LSF' },
+                  { type: 'OB Imb', label: 'Order Book Imbalance', color: COLORS.signals.obi, abbrev: 'OBI' },
+                  { type: 'Delta Unwind', label: 'Delta Unwind', color: COLORS.signals.deltaUnwind, abbrev: 'DU' },
+                  { type: 'Exhaustion', label: 'Exhaustion', color: COLORS.signals.exhaustion, abbrev: 'EXH' },
+                  { type: 'Institutional', label: 'Institutional (trades)', color: COLORS.signals.institutional, abbrev: 'INS' },
+                  { type: 'TF Div', label: 'Trade Flow Divergence', color: COLORS.signals.tradeFlowDiv, abbrev: 'TFD' },
+                ].map(sig => (
+                  <label
+                    key={sig.type}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      padding: '4px 8px',
+                      cursor: 'pointer',
+                      fontSize: '12px',
+                      color: COLORS.text.primary,
+                      gap: '8px',
+                      opacity: showOrderflowSignals ? 1 : 0.5
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedSignalTypes.includes(sig.type)}
+                      disabled={!showOrderflowSignals}
+                      onChange={() => {
+                        setSelectedSignalTypes(prev =>
+                          prev.includes(sig.type)
+                            ? prev.filter(t => t !== sig.type)
+                            : [...prev, sig.type]
+                        )
+                      }}
+                      style={{ cursor: showOrderflowSignals ? 'pointer' : 'not-allowed' }}
+                    />
+                    <span style={{ width: '12px', height: '12px', background: sig.color, borderRadius: '2px' }}></span>
+                    <span>{sig.label}</span>
+                    <span style={{ color: COLORS.text.muted, fontSize: '10px' }}>
+                      ({orderflowSignals.filter(s => s.signal_type === sig.type).length})
+                    </span>
+                  </label>
+                ))}
+                {/* Select/Deselect All */}
+                <div style={{
+                  borderTop: `1px solid ${COLORS.border.light}`,
+                  paddingTop: '8px',
+                  marginTop: '8px',
+                  display: 'flex',
+                  gap: '8px'
+                }}>
+                  <button
+                    onClick={() => setSelectedSignalTypes(['Absorption', 'LSF', 'OB Imb', 'Delta Unwind', 'Exhaustion', 'Institutional', 'TF Div'])}
+                    disabled={!showOrderflowSignals}
+                    style={{
+                      flex: 1,
+                      padding: '4px 8px',
+                      fontSize: '11px',
+                      cursor: showOrderflowSignals ? 'pointer' : 'not-allowed',
+                      background: COLORS.background.secondary,
+                      border: `1px solid ${COLORS.border.light}`,
+                      borderRadius: '2px',
+                      color: COLORS.text.secondary
+                    }}
+                  >
+                    Select All
+                  </button>
+                  <button
+                    onClick={() => setSelectedSignalTypes([])}
+                    disabled={!showOrderflowSignals}
+                    style={{
+                      flex: 1,
+                      padding: '4px 8px',
+                      fontSize: '11px',
+                      cursor: showOrderflowSignals ? 'pointer' : 'not-allowed',
+                      background: COLORS.background.secondary,
+                      border: `1px solid ${COLORS.border.light}`,
+                      borderRadius: '2px',
+                      color: COLORS.text.secondary
+                    }}
+                  >
+                    Clear All
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
+          {/* Signal legend - only show selected types */}
+          {showOrderflowSignals && selectedSignalTypes.length > 0 && (
+            <div className="chart-legend">
+              {selectedSignalTypes.includes('Absorption') && (
+                <span className="legend-item" title="Absorption">
+                  <span className="legend-color" style={{ backgroundColor: COLORS.signals.absorption }}></span>
+                  ABS
+                </span>
+              )}
+              {selectedSignalTypes.includes('LSF') && (
+                <span className="legend-item" title="Liquidity Sweep Fade">
+                  <span className="legend-color" style={{ backgroundColor: COLORS.signals.lsf }}></span>
+                  LSF
+                </span>
+              )}
+              {selectedSignalTypes.includes('OB Imb') && (
+                <span className="legend-item" title="Order Book Imbalance">
+                  <span className="legend-color" style={{ backgroundColor: COLORS.signals.obi }}></span>
+                  OBI
+                </span>
+              )}
+              {selectedSignalTypes.includes('Delta Unwind') && (
+                <span className="legend-item" title="Delta Unwind - Reversal after extreme delta">
+                  <span className="legend-color" style={{ backgroundColor: COLORS.signals.deltaUnwind }}></span>
+                  DU
+                </span>
+              )}
+              {selectedSignalTypes.includes('Exhaustion') && (
+                <span className="legend-item" title="Exhaustion - High volume, minimal price movement">
+                  <span className="legend-color" style={{ backgroundColor: COLORS.signals.exhaustion }}></span>
+                  EXH
+                </span>
+              )}
+              {selectedSignalTypes.includes('Institutional') && (
+                <span className="legend-item" title="Institutional - Large trades with directional flow">
+                  <span className="legend-color" style={{ backgroundColor: COLORS.signals.institutional }}></span>
+                  INS
+                </span>
+              )}
+              {selectedSignalTypes.includes('TF Div') && (
+                <span className="legend-item" title="Trade Flow Divergence - Contrarian signal">
+                  <span className="legend-color" style={{ backgroundColor: COLORS.signals.tradeFlowDiv }}></span>
+                  TFD
+                </span>
+              )}
+            </div>
+          )}
           <div style={{ position: 'relative' }}>
             <button
               onClick={() => setShowIndicatorMenu(!showIndicatorMenu)}

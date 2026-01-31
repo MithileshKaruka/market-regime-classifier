@@ -362,7 +362,7 @@ export default function RegimePanel() {
         )}
       </div>
 
-      {/* Signal Legend - Primary signals only */}
+      {/* Signal Legend - Primary signals with backtested hit rates */}
       <div className="signal-legend">
         <div className="legend-row">
           <span className="legend-dot" style={{ backgroundColor: COLORS.signals.deltaUnwind }}></span>
@@ -375,6 +375,14 @@ export default function RegimePanel() {
         <div className="legend-row">
           <span className="legend-dot" style={{ backgroundColor: COLORS.signals.absorption }}></span>
           <span>{LABELS.signals.absorption} (66.7%)</span>
+        </div>
+        <div className="legend-row">
+          <span className="legend-dot" style={{ backgroundColor: COLORS.signals.institutional }}></span>
+          <span>{LABELS.signals.institutional} (trades)</span>
+        </div>
+        <div className="legend-row">
+          <span className="legend-dot" style={{ backgroundColor: COLORS.signals.tradeFlowDiv }}></span>
+          <span>{LABELS.signals.tradeFlowDiv} (trades)</span>
         </div>
       </div>
     </div>

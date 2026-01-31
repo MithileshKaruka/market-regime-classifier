@@ -125,12 +125,14 @@ export const COLORS = {
 
   // Signal colors
   signals: {
-    absorption: '#22c55e',
-    lsf: '#3b82f6',
-    lsfBearish: '#f97316',
-    obi: '#a855f7',
+    absorption: '#22c55e',       // Green - absorption
+    lsf: '#3b82f6',              // Blue - liquidity sweep fade bullish
+    lsfBearish: '#f97316',       // Orange - liquidity sweep fade bearish
+    obi: '#a855f7',              // Purple - order book imbalance
     deltaUnwind: '#f59e0b',      // Amber - reversal signal
     exhaustion: '#ec4899',       // Pink - exhaustion signal
+    institutional: '#06b6d4',    // Cyan - institutional activity (from trades)
+    tradeFlowDiv: '#8b5cf6',     // Violet - trade flow divergence (from trades)
   },
 
   // Agent mode colors
@@ -323,6 +325,8 @@ export const LABELS = {
     obi: 'OBI',
     deltaUnwind: 'Delta Unwind',
     exhaustion: 'Exhaustion',
+    institutional: 'Institutional',
+    tradeFlowDiv: 'TF Divergence',
   },
   directions: {
     bullish: 'BULLISH',
