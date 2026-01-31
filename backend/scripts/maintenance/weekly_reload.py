@@ -5,8 +5,9 @@ Designed to run every Saturday night when markets are closed.
 Downloads fresh data only if the cost is $0 (data already in Databento cache).
 
 Data downloaded:
-- OHLCV-1M: 5 years of price history
-- MBP-1: 7 days of orderflow data
+- OHLCV-1M: 1 year of price history
+- MBP-1: 3 days of orderflow data (DOM imbalance, quote-inferred delta)
+- Trades: 3 days of trade data (accurate delta, trade flow metrics)
 
 Safety features:
 - Backs up database before any changes
@@ -37,6 +38,7 @@ from config import get_secrets
 # Configuration
 OHLCV_YEARS = 1       # 1 year of OHLCV data
 MBP_DAYS = 3          # 3 days of MBP-1 data
+TRADES_DAYS = 3       # 3 days of trades data (for accurate delta/trade flow metrics)
 DATASET = "GLBX.MDP3"
 SYMBOL = "MNQ.c.0"    # Continuous front-month contract
 STYPE_IN = "continuous"
@@ -201,6 +203,7 @@ def get_date_ranges() -> dict:
 
     ohlcv_start = today - timedelta(days=OHLCV_YEARS * 365)
     mbp_start = today - timedelta(days=MBP_DAYS)
+    trades_start = today - timedelta(days=TRADES_DAYS)
 
     return {
         'ohlcv': {
@@ -212,6 +215,11 @@ def get_date_ranges() -> dict:
             'start': mbp_start.strftime('%Y-%m-%d'),
             'end': today.strftime('%Y-%m-%d'),
             'days': (today - mbp_start).days,
+        },
+        'trades': {
+            'start': trades_start.strftime('%Y-%m-%d'),
+            'end': today.strftime('%Y-%m-%d'),
+            'days': (today - trades_start).days,
         }
     }
 
@@ -227,7 +235,7 @@ def estimate_cost(api_key: str, date_ranges: dict) -> tuple[float, dict]:
     print("=" * 60)
 
     client = db.Historical(api_key)
-    costs = {'ohlcv': 0.0, 'mbp': 0.0}
+    costs = {'ohlcv': 0.0, 'mbp': 0.0, 'trades': 0.0}
 
     # OHLCV cost
     print(f"\nOHLCV-1M ({date_ranges['ohlcv']['days']} days)...")
@@ -265,14 +273,32 @@ def estimate_cost(api_key: str, date_ranges: dict) -> tuple[float, dict]:
         print(f"  Error estimating: {e}")
         costs['mbp'] = -1  # Error flag
 
+    # Trades cost
+    print(f"\nTrades ({date_ranges['trades']['days']} days)...")
+    print(f"  Range: {date_ranges['trades']['start']} to {date_ranges['trades']['end']}")
+    try:
+        trades_cost = client.metadata.get_cost(
+            dataset=DATASET,
+            symbols=[SYMBOL],
+            stype_in=STYPE_IN,
+            schema="trades",
+            start=date_ranges['trades']['start'],
+            end=date_ranges['trades']['end'],
+        )
+        costs['trades'] = float(trades_cost)
+        print(f"  Estimated cost: ${trades_cost:.2f}")
+    except Exception as e:
+        print(f"  Error estimating: {e}")
+        costs['trades'] = -1  # Error flag
+
     # Check for errors
-    if costs['ohlcv'] < 0 or costs['mbp'] < 0:
+    if costs['ohlcv'] < 0 or costs['mbp'] < 0 or costs['trades'] < 0:
         print(f"\n{'='*60}")
         print(f"  ERROR: Could not estimate costs")
         print(f"{'='*60}")
         return -1, costs
 
-    total = costs['ohlcv'] + costs['mbp']
+    total = costs['ohlcv'] + costs['mbp'] + costs['trades']
 
     print(f"\n{'='*60}")
     print(f"  TOTAL ESTIMATED COST: ${total:.2f}")
@@ -380,6 +406,33 @@ def download_and_load_mbp(api_key: str, start: str, end: str):
         return True
     except Exception as e:
         print(f"  ERROR: Failed to download MBP data: {e}")
+        return False
+
+
+def download_and_load_trades(api_key: str, start: str, end: str):
+    """Download and load trades data using chunked approach
+
+    Trades data provides accurate delta calculation and trade flow metrics:
+    - True delta from actual trade sides (not quote inference)
+    - Trade flow ratio (buy/sell proportion)
+    - Large trade detection (institutional activity)
+    """
+    print("\n" + "=" * 60)
+    print("  Downloading Trades Data")
+    print("=" * 60)
+
+    from scripts.data.preload_historical import download_and_load_trades_chunked
+
+    try:
+        download_and_load_trades_chunked(
+            api_key,
+            start,
+            end,
+            hours_per_chunk=4  # 4-hour chunks for memory efficiency
+        )
+        return True
+    except Exception as e:
+        print(f"  ERROR: Failed to download trades data: {e}")
         return False
 
 
@@ -532,6 +585,7 @@ def main():
 Configuration:
   OHLCV: {OHLCV_YEARS} years
   MBP-1: {MBP_DAYS} days
+  Trades: {TRADES_DAYS} days
   Max cost: ${MAX_ALLOWED_COST:.2f}
 
 Examples:
@@ -583,13 +637,14 @@ Examples:
     print(f"\nData Configuration:")
     print(f"  OHLCV: {OHLCV_YEARS} years ({date_ranges['ohlcv']['days']} days)")
     print(f"  MBP-1: {MBP_DAYS} days")
+    print(f"  Trades: {TRADES_DAYS} days")
     print(f"  Max allowed cost: ${MAX_ALLOWED_COST:.2f}")
 
     # Skip cost check if requested
     if args.skip_cost_check:
         print("\n[SKIP] Cost check skipped (--skip-cost-check)")
         total_cost = 0.0
-        cost_details = {'ohlcv': 0.0, 'mbp': 0.0}
+        cost_details = {'ohlcv': 0.0, 'mbp': 0.0, 'trades': 0.0}
     else:
         # Estimate cost
         total_cost, cost_details = estimate_cost(api_key, date_ranges)
@@ -654,10 +709,18 @@ Examples:
             ):
                 raise Exception("MBP download/load failed")
 
-            # Step 6: Print summary
+            # Step 6: Download and load trades (updates OHLCV bars with trade flow metrics)
+            if not download_and_load_trades(
+                api_key,
+                date_ranges['trades']['start'],
+                date_ranges['trades']['end']
+            ):
+                raise Exception("Trades download/load failed")
+
+            # Step 7: Print summary
             print_summary()
 
-            # Step 7: Verify data integrity
+            # Step 8: Verify data integrity
             if not verify_data_loaded():
                 raise Exception("Data verification failed - minimum bar counts not met")
 
@@ -680,7 +743,7 @@ Examples:
 
             return 1
 
-        # Step 8: Clean up backup only if reload was successful (and not --keep-backup)
+        # Step 9: Clean up backup only if reload was successful (and not --keep-backup)
         if reload_success and backup_path and not args.keep_backup:
             cleanup_backup(backup_path)
             cleanup_old_backups(keep_count=2)  # Keep last 2 backups as safety

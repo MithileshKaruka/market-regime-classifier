@@ -48,9 +48,22 @@ class DuckDBStorage:
                 total_bid_depth DOUBLE,
                 total_ask_depth DOUBLE,
                 cvd BIGINT,
+                trade_flow_ratio DOUBLE,
+                buy_trades INTEGER,
+                sell_trades INTEGER,
+                large_trade_count INTEGER,
                 PRIMARY KEY (symbol, timeframe, timestamp)
             )
         """)
+
+        # Add trade flow columns to existing tables (for database migrations)
+        try:
+            self.conn.execute("ALTER TABLE ohlcv_ticks ADD COLUMN IF NOT EXISTS trade_flow_ratio DOUBLE")
+            self.conn.execute("ALTER TABLE ohlcv_ticks ADD COLUMN IF NOT EXISTS buy_trades INTEGER")
+            self.conn.execute("ALTER TABLE ohlcv_ticks ADD COLUMN IF NOT EXISTS sell_trades INTEGER")
+            self.conn.execute("ALTER TABLE ohlcv_ticks ADD COLUMN IF NOT EXISTS large_trade_count INTEGER")
+        except Exception:
+            pass  # Columns already exist or DB doesn't support IF NOT EXISTS
 
         # Regime classifications
         self.conn.execute("""

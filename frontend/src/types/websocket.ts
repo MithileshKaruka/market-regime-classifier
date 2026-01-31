@@ -8,6 +8,7 @@ export type WebSocketMessageType =
   | 'bar_close'
   | 'signal'
   | 'regime_change'
+  | 'large_trade'
   | 'subscribed'
   | 'pong'
   | 'heartbeat'
@@ -25,6 +26,20 @@ export interface BarData {
   total_ask_depth?: number
   cvd?: number
   tick_count?: number
+  // Trade flow metrics (from actual trades, not quote inference)
+  trade_flow_ratio?: number  // 0.0=all sells, 1.0=all buys
+  buy_trades?: number        // Count of buy aggressor trades
+  sell_trades?: number       // Count of sell aggressor trades
+  large_trade_count?: number // Count of institutional-sized trades (>=50 contracts)
+}
+
+export interface LargeTradeData {
+  timestamp: string
+  price: number
+  size: number
+  side: 'A' | 'B'  // 'A'=ask (buy aggressor), 'B'=bid (sell aggressor)
+  direction: 'BUY' | 'SELL' | 'UNKNOWN'
+  delta: number
 }
 
 export interface SignalData {
@@ -49,7 +64,7 @@ export interface WebSocketMessage {
   type: WebSocketMessageType
   timeframe?: string
   symbol?: string
-  data?: BarData | SignalData | RegimeData
+  data?: BarData | SignalData | RegimeData | LargeTradeData
   timestamp?: string
   subscriptions?: string[]
 }

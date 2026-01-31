@@ -1,10 +1,11 @@
-"""Live data ingestion from Databento stream with MBP-1 schema
+"""Live data ingestion from Databento stream with MBP-1 and Trades schemas
 
 This module handles real-time market data streaming using:
-- MBP-1: Top-of-book quotes for DOM imbalance, delta, and OHLCV
+- MBP-1: Top-of-book quotes for DOM imbalance and OHLCV
+- Trades: Actual trade data for accurate delta/CVD calculation
 
 Data is aggregated into ohlcv_ticks table and pushed via WebSocket.
-Raw MBP-1 data is archived to DBN files for backtesting.
+Raw data is archived to DBN files for backtesting.
 """
 import asyncio
 import logging
@@ -55,13 +56,17 @@ logger = logging.getLogger(__name__)
 
 
 class LiveDataIngestion:
-    """Handles real-time streaming from Databento with MBP-1
+    """Handles real-time streaming from Databento with MBP-1 and Trades
 
     Subscribes to MBP-1 schema for:
     - Top-of-book quotes (best bid/ask)
     - DOM imbalance calculation
-    - Delta from quote size changes
     - OHLCV from mid-price
+
+    Subscribes to Trades schema for:
+    - Accurate delta calculation (buy vs sell aggressor)
+    - Trade flow metrics (institutional vs retail)
+    - Large trade detection
 
     Data is aggregated into ohlcv_ticks table and pushed via WebSocket.
     """
@@ -130,8 +135,24 @@ class LiveDataIngestion:
             window_size = self.cvd_windows.get(tf, 100)
             self.delta_buffers[tf] = {s: deque(maxlen=window_size) for s in self.symbols}
 
-        # Track previous quote for delta calculation
+        # Track previous quote for delta calculation (fallback when no trades)
         self.prev_quotes: Dict[str, Dict[str, Any]] = {s: {} for s in self.symbols}
+
+        # Trade tracking for accurate delta calculation
+        # Accumulates trades per bar, resets on bar close
+        self.trade_delta: Dict[str, Dict[str, int]] = {}  # timeframe -> symbol -> delta
+        self.trade_volume: Dict[str, Dict[str, int]] = {}  # timeframe -> symbol -> volume
+        self.buy_trades: Dict[str, Dict[str, int]] = {}  # timeframe -> symbol -> count
+        self.sell_trades: Dict[str, Dict[str, int]] = {}  # timeframe -> symbol -> count
+        self.large_trades: Dict[str, Dict[str, List]] = {}  # timeframe -> symbol -> list of large trades
+        self.large_trade_threshold = 50  # contracts - trades >= this are "large"
+
+        for tf in self.timeframes:
+            self.trade_delta[tf] = {s: 0 for s in self.symbols}
+            self.trade_volume[tf] = {s: 0 for s in self.symbols}
+            self.buy_trades[tf] = {s: 0 for s in self.symbols}
+            self.sell_trades[tf] = {s: 0 for s in self.symbols}
+            self.large_trades[tf] = {s: [] for s in self.symbols}
 
         # Track last completed bar's close for spike filtering across bar boundaries
         self.last_bar_close: Dict[str, Dict[str, Optional[float]]] = {}
@@ -253,11 +274,13 @@ class LiveDataIngestion:
         return trade
 
     def calculate_delta_from_quote(self, quote: dict, prev_quote: dict) -> int:
-        """Calculate delta from quote size changes
+        """Calculate delta from quote size changes (FALLBACK - used only if no trades)
 
         Delta is inferred from changes in bid/ask sizes:
         - Decrease in ask size = buy aggression (positive delta)
         - Decrease in bid size = sell aggression (negative delta)
+
+        Note: This is approximate. Prefer trade-based delta when available.
         """
         if not prev_quote:
             return 0
@@ -274,6 +297,96 @@ class LiveDataIngestion:
             delta -= abs(bid_change)  # Sell aggression
 
         return delta
+
+    async def process_trade(self, trade: dict, symbol: str):
+        """Process a trade and update delta/volume tracking
+
+        Trade data provides accurate delta calculation:
+        - side='A' (ask hit) = buy aggressor, positive delta
+        - side='B' (bid hit) = sell aggressor, negative delta
+
+        This is much more accurate than inferring from quote changes.
+        """
+        try:
+            size = trade.get('size', 0)
+            side = trade.get('side', '')
+            price = trade.get('price', 0)
+            ts_event = trade.get('ts_event', 0)
+
+            # Convert timestamp
+            tick_ts = datetime.fromtimestamp(ts_event / 1e9, tz=timezone.utc)
+
+            # Calculate signed delta from trade
+            # 'A' = ask side hit = buyer aggressor = positive delta
+            # 'B' = bid side hit = seller aggressor = negative delta
+            if side == 'A':
+                signed_delta = size  # Buy
+            elif side == 'B':
+                signed_delta = -size  # Sell
+            else:
+                signed_delta = 0  # Unknown side
+
+            # Update trade tracking for each timeframe
+            for tf in self.timeframes:
+                bar_ts = self.truncate_timestamp(tick_ts, tf)
+                current_bar = self.current_bars[tf].get(symbol)
+
+                # Check if this trade belongs to current bar or new bar
+                if current_bar is None or current_bar['timestamp'] != bar_ts:
+                    # Trade is for a new bar period - don't reset yet
+                    # The bar will be created/closed by process_mbp_tick
+                    # Just track that we need to reset on next bar
+                    pass
+
+                # Accumulate trade data
+                self.trade_delta[tf][symbol] += signed_delta
+                self.trade_volume[tf][symbol] += size
+
+                # Track buy/sell counts
+                if side == 'A':
+                    self.buy_trades[tf][symbol] += 1
+                elif side == 'B':
+                    self.sell_trades[tf][symbol] += 1
+
+                # Track large trades (institutional)
+                if size >= self.large_trade_threshold:
+                    large_trade = {
+                        'timestamp': tick_ts,
+                        'price': price,
+                        'size': size,
+                        'side': side,
+                        'delta': signed_delta,
+                        'direction': 'BUY' if side == 'A' else 'SELL' if side == 'B' else 'UNKNOWN',
+                    }
+                    self.large_trades[tf][symbol].append(large_trade)
+
+                    # Send WebSocket alert for large trades (only on first timeframe to avoid duplicates)
+                    if tf == self.timeframes[0]:
+                        await self._ws_manager.send_large_trade(normalize_symbol(symbol), large_trade)
+
+        except Exception as e:
+            logger.error(f"Error processing trade: {e}", exc_info=True)
+
+    def get_trade_delta(self, timeframe: str, symbol: str) -> int:
+        """Get accumulated trade delta for current bar"""
+        return self.trade_delta.get(timeframe, {}).get(symbol, 0)
+
+    def get_trade_flow_ratio(self, timeframe: str, symbol: str) -> float:
+        """Get buy/total trade ratio (0.0=all sells, 1.0=all buys)"""
+        buys = self.buy_trades.get(timeframe, {}).get(symbol, 0)
+        sells = self.sell_trades.get(timeframe, {}).get(symbol, 0)
+        total = buys + sells
+        if total == 0:
+            return 0.5  # Neutral
+        return buys / total
+
+    def reset_trade_tracking(self, timeframe: str, symbol: str):
+        """Reset trade tracking for a new bar"""
+        self.trade_delta[timeframe][symbol] = 0
+        self.trade_volume[timeframe][symbol] = 0
+        self.buy_trades[timeframe][symbol] = 0
+        self.sell_trades[timeframe][symbol] = 0
+        self.large_trades[timeframe][symbol] = []
 
     def update_bar_with_quote(self, bar: Optional[dict], quote: dict, delta: int, bar_timestamp: datetime, last_close: Optional[float] = None) -> Optional[dict]:
         """Update an existing bar with a new MBP-1 quote
@@ -351,11 +464,15 @@ class LiveDataIngestion:
             return bar
 
     async def process_mbp_tick(self, quote: dict, symbol: str):
-        """Process an MBP-1 tick and update bars for all timeframes"""
+        """Process an MBP-1 tick and update bars for all timeframes
+
+        Uses trade-based delta when available (more accurate),
+        falls back to quote-inferred delta if no trades received.
+        """
         try:
-            # Calculate delta from quote change
+            # Calculate fallback delta from quote change (used if no trades)
             prev_quote = self.prev_quotes.get(symbol, {})
-            delta = self.calculate_delta_from_quote(quote, prev_quote)
+            quote_delta = self.calculate_delta_from_quote(quote, prev_quote)
             self.prev_quotes[symbol] = quote
 
             # Convert timestamp (use UTC timezone so it serializes with +00:00 suffix)
@@ -370,8 +487,19 @@ class LiveDataIngestion:
                 if current_bar is None or current_bar['timestamp'] != bar_ts:
                     # Save previous bar if exists (bar closed)
                     if current_bar is not None:
+                        # Use trade-based delta if available, otherwise quote-inferred
+                        trade_delta = self.get_trade_delta(tf, symbol)
+                        final_delta = trade_delta if trade_delta != 0 else current_bar['instant_delta']
+                        current_bar['instant_delta'] = final_delta
+
+                        # Add trade flow metrics to bar
+                        current_bar['trade_flow_ratio'] = self.get_trade_flow_ratio(tf, symbol)
+                        current_bar['buy_trades'] = self.buy_trades[tf][symbol]
+                        current_bar['sell_trades'] = self.sell_trades[tf][symbol]
+                        current_bar['large_trade_count'] = len(self.large_trades[tf][symbol])
+
                         # Add completed bar's delta to rolling buffer
-                        self.delta_buffers[tf][symbol].append(current_bar['instant_delta'])
+                        self.delta_buffers[tf][symbol].append(final_delta)
                         # Calculate rolling CVD from buffer
                         current_bar['cvd'] = sum(self.delta_buffers[tf][symbol])
 
@@ -385,9 +513,13 @@ class LiveDataIngestion:
                         if self.on_bar_close:
                             await self.on_bar_close(tf, symbol, current_bar)
 
+                        # Reset trade tracking for new bar
+                        self.reset_trade_tracking(tf, symbol)
+
                     # Start new bar (pass last_close for spike filtering)
+                    # Use quote_delta as initial value (will be overwritten by trades)
                     last_close = self.last_bar_close[tf][symbol]
-                    current_bar = self.update_bar_with_quote(None, quote, delta, bar_ts, last_close=last_close)
+                    current_bar = self.update_bar_with_quote(None, quote, quote_delta, bar_ts, last_close=last_close)
                     self.current_bars[tf][symbol] = current_bar
                 else:
                     # Update existing bar
@@ -432,6 +564,10 @@ class LiveDataIngestion:
                     'total_bid_depth': bar['total_bid_depth'],
                     'total_ask_depth': bar['total_ask_depth'],
                     'cvd': bar['cvd'],
+                    'trade_flow_ratio': bar.get('trade_flow_ratio'),
+                    'buy_trades': bar.get('buy_trades'),
+                    'sell_trades': bar.get('sell_trades'),
+                    'large_trade_count': bar.get('large_trade_count'),
                 }])
                 storage.insert_ohlcv_ticks(df, symbol=db_symbol, timeframe=timeframe)
 
@@ -484,20 +620,23 @@ class LiveDataIngestion:
         return self._current_dbn_path
 
     async def start_streaming(self):
-        """Start consuming live market data from MBP-1 schema
+        """Start consuming live market data from MBP-1 and Trades schemas
 
-        Raw MBP-1 data is automatically archived to daily DBN files
-        using Databento's native streaming. Records are also processed
-        in real-time to update ohlcv_ticks and push via WebSocket.
+        - MBP-1: Top-of-book quotes for DOM imbalance
+        - Trades: Accurate delta calculation from actual trades
+
+        Raw data is automatically archived to daily DBN files.
+        Records are processed in real-time to update ohlcv_ticks.
         """
         if not self.api_key:
             raise ValueError("Databento API key not configured. Set DATABENTO_API_KEY or update secrets.yaml")
 
         logger.info("=" * 60)
-        logger.info("Starting live data ingestion (MBP-1)...")
+        logger.info("Starting live data ingestion (MBP-1 + Trades)...")
         logger.info(f"  Symbols: {self.symbols}")
         logger.info(f"  Timeframes: {self.timeframes}")
         logger.info(f"  Archive dir: {self.archive_dir}")
+        logger.info(f"  Large trade threshold: {self.large_trade_threshold} contracts")
         logger.info("=" * 60)
 
         client = db.Live(key=self.api_key)
@@ -508,10 +647,11 @@ class LiveDataIngestion:
             client.add_stream(str(dbn_path))
             logger.info(f"Archiving to DBN: {dbn_path}")
 
-            # Subscribe to MBP-1 (top-of-book quotes)
             # Get stype_in from config (raw_symbol for specific contracts, parent for continuous)
             db_config = get_databento_config()
             stype_in = db_config.get('streaming', {}).get('stype_in', 'raw_symbol')
+
+            # Subscribe to MBP-1 (top-of-book quotes for DOM)
             client.subscribe(
                 dataset=self.dataset,
                 schema="mbp-1",
@@ -519,6 +659,15 @@ class LiveDataIngestion:
                 stype_in=stype_in,
             )
             logger.info(f"Subscribed to MBP-1 with stype_in={stype_in}")
+
+            # Subscribe to Trades (for accurate delta calculation)
+            client.subscribe(
+                dataset=self.dataset,
+                schema="trades",
+                symbols=self.symbols,
+                stype_in=stype_in,
+            )
+            logger.info(f"Subscribed to Trades with stype_in={stype_in}")
 
             tick_count = 0
             last_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
@@ -554,6 +703,15 @@ class LiveDataIngestion:
                         continue
                     await self.process_mbp_tick(quote, symbol=symbol)
                     tick_count += 1
+
+                elif record_type == "TradeMsg":
+                    # Trade - process for accurate delta calculation
+                    trade = self.extract_trade(record)
+                    instrument_id = record.instrument_id
+                    symbol = self.instrument_id_to_symbol.get(instrument_id)
+                    if symbol is None:
+                        continue  # Silently skip unknown symbols for trades
+                    await self.process_trade(trade, symbol=symbol)
 
                 # Check for daily file rotation
                 current_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')

@@ -13,7 +13,7 @@ streaming:
   # Schemas to subscribe
   schemas:
     - "mbp-1"   # Top-of-book quotes for DOM/spread
-    # - "trades"  # Reserved for future: footprint charts
+    - "trades"  # Trade data for accurate delta/CVD calculation
 
   # Symbol type for subscription
   stype_in: "continuous"  # Use continuous contract symbology

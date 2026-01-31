@@ -139,6 +139,22 @@ class ConnectionManager:
         }
         await self.send_to_subscribers(f"{timeframe}:{symbol}", message)
 
+    async def send_large_trade(self, symbol: str, trade: dict):
+        """Send large trade alert (institutional-sized order)
+
+        Large trades are defined as >= 50 contracts and may indicate
+        institutional activity or significant market interest.
+        """
+        message = {
+            "type": "large_trade",
+            "symbol": symbol,
+            "data": trade,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        # Broadcast to all timeframe subscribers for this symbol
+        for timeframe in ["5M", "15M", "1H", "4H", "1D"]:
+            await self.send_to_subscribers(f"{timeframe}:{symbol}", message)
+
 
 # Global connection manager
 manager = ConnectionManager()

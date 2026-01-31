@@ -279,6 +279,152 @@ def load_mbp_file(file_path: Path, chunk_size: int = 1_000_000):
     print("  Or run download_and_load_mbp_chunked() for streaming load")
 
 
+def download_and_load_trades_chunked(api_key: str, start_date: str, end_date: str, hours_per_chunk: int = 4):
+    """Download trades data and aggregate to update OHLCV bars with trade flow metrics
+
+    This function downloads actual trade data (not quote-inferred) and updates
+    existing OHLCV bars with accurate trade flow metrics:
+    - trade_flow_ratio: proportion of buy vs sell volume
+    - buy_trades: count of buy aggressor trades
+    - sell_trades: count of sell aggressor trades
+    - large_trade_count: count of institutional-sized trades (>=50 contracts)
+
+    Args:
+        api_key: Databento API key
+        start_date: Start date YYYY-MM-DD
+        end_date: End date YYYY-MM-DD
+        hours_per_chunk: Hours per download chunk (default 4)
+    """
+    import polars as pl
+    import gc
+
+    print(f"\nDownloading trades and updating OHLCV bars with trade flow metrics...")
+    print(f"  Range: {start_date} to {end_date}")
+    print(f"  Chunk size: {hours_per_chunk} hours")
+
+    start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+    end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+
+    timeframes = {
+        "5M": "5m",
+        "15M": "15m",
+        "1H": "1h",
+        "4H": "4h",
+        "1D": "1d",
+    }
+
+    LARGE_TRADE_THRESHOLD = 50  # contracts
+
+    with DuckDBStorage() as storage:
+        client = db.Historical(api_key)
+        total_trades = 0
+        total_bars_updated = 0
+        chunk_num = 0
+        current = start_dt
+
+        while current < end_dt:
+            chunk_num += 1
+            chunk_end = min(current + timedelta(hours=hours_per_chunk), end_dt)
+
+            print(f"\n  Chunk {chunk_num}: {current.strftime('%Y-%m-%d %H:%M')} to {chunk_end.strftime('%Y-%m-%d %H:%M')}...")
+
+            try:
+                # Download chunk directly to dataframe
+                data = client.timeseries.get_range(
+                    dataset=DATASET,
+                    symbols=[SYMBOL],
+                    stype_in=STYPE_IN,
+                    schema="trades",
+                    start=current.strftime('%Y-%m-%dT%H:%M:%S'),
+                    end=chunk_end.strftime('%Y-%m-%dT%H:%M:%S'),
+                )
+
+                df = data.to_df()
+                if len(df) == 0:
+                    print(f"    No trades for this period")
+                    current = chunk_end
+                    continue
+
+                # Reset index
+                if hasattr(df, 'index'):
+                    df = df.reset_index()
+                    if 'index' in df.columns:
+                        df = df.rename(columns={'index': 'ts_event'})
+
+                total_trades += len(df)
+                print(f"    Downloaded: {len(df):,} trades")
+
+                # Convert to polars
+                df_pl = pl.from_pandas(df)
+
+                # Process trades: classify as buy or sell based on side field
+                # 'A' = ask (buy aggressor), 'B' = bid (sell aggressor)
+                df_trades = df_pl.with_columns([
+                    pl.col("ts_event").alias("timestamp"),
+                    pl.when(pl.col("side") == "A").then(1).otherwise(0).alias("is_buy"),
+                    pl.when(pl.col("side") == "B").then(1).otherwise(0).alias("is_sell"),
+                    pl.when(pl.col("size") >= LARGE_TRADE_THRESHOLD).then(1).otherwise(0).alias("is_large"),
+                ])
+
+                del df, data
+                gc.collect()
+
+                # Aggregate to each timeframe and update bars
+                chunk_bars = 0
+                for tf, duration in timeframes.items():
+                    # Aggregate trade metrics per bar
+                    df_agg = df_trades.group_by_dynamic(
+                        "timestamp", every=duration, closed="left", label="left"
+                    ).agg([
+                        pl.col("is_buy").sum().alias("buy_trades"),
+                        pl.col("is_sell").sum().alias("sell_trades"),
+                        pl.col("is_large").sum().alias("large_trade_count"),
+                    ]).with_columns([
+                        # trade_flow_ratio: 0.0 = all sells, 1.0 = all buys
+                        (pl.col("buy_trades") / (pl.col("buy_trades") + pl.col("sell_trades"))).fill_nan(0.5).alias("trade_flow_ratio"),
+                    ])
+
+                    # Update existing OHLCV bars with trade metrics
+                    for row in df_agg.iter_rows(named=True):
+                        storage.conn.execute("""
+                            UPDATE ohlcv_ticks
+                            SET trade_flow_ratio = ?,
+                                buy_trades = ?,
+                                sell_trades = ?,
+                                large_trade_count = ?
+                            WHERE timestamp = ?
+                              AND symbol = 'MNQ'
+                              AND timeframe = ?
+                        """, [
+                            row['trade_flow_ratio'],
+                            row['buy_trades'],
+                            row['sell_trades'],
+                            row['large_trade_count'],
+                            row['timestamp'],
+                            tf
+                        ])
+                        chunk_bars += 1
+
+                storage.conn.commit()
+                total_bars_updated += chunk_bars
+                print(f"    Updated: {chunk_bars} bars (total: {total_bars_updated})")
+
+                del df_trades, df_agg
+                gc.collect()
+
+            except Exception as e:
+                print(f"    Error: {e}")
+                import traceback
+                traceback.print_exc()
+
+            current = chunk_end
+            gc.collect()
+
+        print(f"\n  Total trades processed: {total_trades:,}")
+        print(f"  Total bars updated: {total_bars_updated}")
+        print("  Done!")
+
+
 def download_and_load_mbp_chunked(api_key: str, start_date: str, end_date: str, hours_per_chunk: int = 4):
     """Download MBP data and aggregate directly to OHLCV bars (memory efficient)
 
