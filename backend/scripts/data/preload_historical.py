@@ -59,35 +59,37 @@ def get_date_ranges(
     Returns:
         Dict with start/end dates for each schema
     """
+    # Use yesterday as end date - Databento data has ~1 day delay
     today = datetime.now(timezone.utc).date()
+    end_date = today - timedelta(days=1)
 
     # OHLCV: 5 years back (or custom start)
     if ohlcv_start:
         ohlcv_start_date = datetime.strptime(ohlcv_start, '%Y-%m-%d').date()
     else:
-        ohlcv_start_date = today - timedelta(days=ohlcv_years * 365)
+        ohlcv_start_date = end_date - timedelta(days=ohlcv_years * 365)
 
     # MBP-1: 60 days back
-    mbp_start_date = today - timedelta(days=mbp_days)
+    mbp_start_date = end_date - timedelta(days=mbp_days)
 
     # Trades: 14 days back (for institutional activity signals)
-    trades_start_date = today - timedelta(days=trades_days)
+    trades_start_date = end_date - timedelta(days=trades_days)
 
     return {
         'ohlcv': {
             'start': ohlcv_start_date.strftime('%Y-%m-%d'),
-            'end': today.strftime('%Y-%m-%d'),
-            'days': (today - ohlcv_start_date).days,
+            'end': end_date.strftime('%Y-%m-%d'),
+            'days': (end_date - ohlcv_start_date).days,
         },
         'mbp': {
             'start': mbp_start_date.strftime('%Y-%m-%d'),
-            'end': today.strftime('%Y-%m-%d'),
-            'days': (today - mbp_start_date).days,
+            'end': end_date.strftime('%Y-%m-%d'),
+            'days': (end_date - mbp_start_date).days,
         },
         'trades': {
             'start': trades_start_date.strftime('%Y-%m-%d'),
-            'end': today.strftime('%Y-%m-%d'),
-            'days': (today - trades_start_date).days,
+            'end': end_date.strftime('%Y-%m-%d'),
+            'days': (end_date - trades_start_date).days,
         }
     }
 
