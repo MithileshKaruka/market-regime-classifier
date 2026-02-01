@@ -50,20 +50,22 @@ async def get_chart_with_indicators(
 
     with DuckDBStorage() as storage:
         # Get total count for pagination info
-        # Data is pre-filtered during load, so no need to filter here
+        # Filter out spurious low-volume bars (V=1 weekend/holiday ticks)
         count_result = storage.conn.execute(f"""
             SELECT COUNT(*) as total
             FROM ohlcv_ticks
             WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
+              AND volume > 1
         """).fetchone()
         total_count = count_result[0] if count_result else 0
 
         # Get OHLCV data with pagination
-        # Data is already clean from load process (settlement artifacts removed)
+        # Filter out spurious low-volume bars (V=1 weekend/holiday single ticks)
         df_ohlcv = storage.conn.execute(f"""
             SELECT timestamp, open, high, low, close, volume
             FROM ohlcv_ticks
             WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
+              AND volume > 1
             ORDER BY timestamp DESC
             LIMIT {limit} OFFSET {offset}
         """).pl()
