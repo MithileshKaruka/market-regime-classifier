@@ -36,6 +36,7 @@ from config import get_secrets
 # Default configuration
 DEFAULT_OHLCV_YEARS = 5
 DEFAULT_MBP_DAYS = 60
+DEFAULT_TRADES_DAYS = 14  # Trades data for institutional activity signals
 DATASET = "GLBX.MDP3"
 SYMBOL = "MNQ.c.0"  # Continuous front-month contract
 STYPE_IN = "continuous"
@@ -44,7 +45,8 @@ STYPE_IN = "continuous"
 def get_date_ranges(
     ohlcv_years: int = DEFAULT_OHLCV_YEARS,
     ohlcv_start: Optional[str] = None,
-    mbp_days: int = DEFAULT_MBP_DAYS
+    mbp_days: int = DEFAULT_MBP_DAYS,
+    trades_days: int = DEFAULT_TRADES_DAYS
 ) -> dict:
     """Calculate date ranges for data download
 
@@ -52,6 +54,7 @@ def get_date_ranges(
         ohlcv_years: Years of OHLCV data to download
         ohlcv_start: Optional fixed start date for OHLCV
         mbp_days: Days of MBP-1 data to download
+        trades_days: Days of trades data to download
 
     Returns:
         Dict with start/end dates for each schema
@@ -67,6 +70,9 @@ def get_date_ranges(
     # MBP-1: 60 days back
     mbp_start_date = today - timedelta(days=mbp_days)
 
+    # Trades: 14 days back (for institutional activity signals)
+    trades_start_date = today - timedelta(days=trades_days)
+
     return {
         'ohlcv': {
             'start': ohlcv_start_date.strftime('%Y-%m-%d'),
@@ -77,6 +83,11 @@ def get_date_ranges(
             'start': mbp_start_date.strftime('%Y-%m-%d'),
             'end': today.strftime('%Y-%m-%d'),
             'days': (today - mbp_start_date).days,
+        },
+        'trades': {
+            'start': trades_start_date.strftime('%Y-%m-%d'),
+            'end': today.strftime('%Y-%m-%d'),
+            'days': (today - trades_start_date).days,
         }
     }
 
@@ -684,12 +695,16 @@ Examples:
                         help='Only download OHLCV data')
     parser.add_argument('--mbp-only', action='store_true',
                         help='Only download MBP-1 data')
+    parser.add_argument('--trades-only', action='store_true',
+                        help='Only download trades data')
     parser.add_argument('--ohlcv-years', type=int, default=DEFAULT_OHLCV_YEARS,
                         help=f'Years of OHLCV data (default: {DEFAULT_OHLCV_YEARS})')
     parser.add_argument('--ohlcv-start', type=str,
                         help='Fixed start date for OHLCV (YYYY-MM-DD)')
     parser.add_argument('--mbp-days', type=int, default=DEFAULT_MBP_DAYS,
                         help=f'Days of MBP-1 data (default: {DEFAULT_MBP_DAYS})')
+    parser.add_argument('--trades-days', type=int, default=DEFAULT_TRADES_DAYS,
+                        help=f'Days of trades data (default: {DEFAULT_TRADES_DAYS})')
     parser.add_argument('--keep-files', action='store_true',
                         help='Keep downloaded DBN files after loading')
 
@@ -716,12 +731,14 @@ Examples:
     date_ranges = get_date_ranges(
         ohlcv_years=args.ohlcv_years,
         ohlcv_start=args.ohlcv_start,
-        mbp_days=args.mbp_days
+        mbp_days=args.mbp_days,
+        trades_days=args.trades_days
     )
 
     print(f"\nData ranges:")
     print(f"  OHLCV-1M: {date_ranges['ohlcv']['start']} to {date_ranges['ohlcv']['end']} ({date_ranges['ohlcv']['days']} days)")
     print(f"  MBP-1:    {date_ranges['mbp']['start']} to {date_ranges['mbp']['end']} ({date_ranges['mbp']['days']} days)")
+    print(f"  Trades:   {date_ranges['trades']['start']} to {date_ranges['trades']['end']} ({date_ranges['trades']['days']} days)")
 
     # Estimate cost
     if args.estimate:
@@ -736,14 +753,17 @@ Examples:
         print("  Ready to Download")
         print("=" * 60)
 
-        if not args.ohlcv_only and not args.mbp_only:
+        if not args.ohlcv_only and not args.mbp_only and not args.trades_only:
             print("\nThis will download:")
             print(f"  - {date_ranges['ohlcv']['days']} days of OHLCV-1M data")
             print(f"  - {date_ranges['mbp']['days']} days of MBP-1 data")
+            print(f"  - {date_ranges['trades']['days']} days of trades data")
         elif args.ohlcv_only:
             print(f"\nThis will download {date_ranges['ohlcv']['days']} days of OHLCV-1M data")
         elif args.mbp_only:
             print(f"\nThis will download {date_ranges['mbp']['days']} days of MBP-1 data")
+        elif args.trades_only:
+            print(f"\nThis will download {date_ranges['trades']['days']} days of trades data")
 
         print("\nNote: Run with --estimate first to check costs")
 
@@ -757,7 +777,7 @@ Examples:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Download and load OHLCV
-        if not args.mbp_only:
+        if not args.mbp_only and not args.trades_only:
             ohlcv_path = download_ohlcv(
                 api_key,
                 date_ranges['ohlcv']['start'],
@@ -771,12 +791,21 @@ Examples:
                     print(f"  Cleaned up: {ohlcv_path.name}")
 
         # Download and load MBP-1 (chunked to manage memory)
-        if not args.ohlcv_only:
+        if not args.ohlcv_only and not args.trades_only:
             download_and_load_mbp_chunked(
                 api_key,
                 date_ranges['mbp']['start'],
                 date_ranges['mbp']['end'],
                 hours_per_chunk=4  # 4-hour chunks for 8GB RAM
+            )
+
+        # Download and load trades (for institutional activity signals)
+        if not args.ohlcv_only and not args.mbp_only:
+            download_and_load_trades_chunked(
+                api_key,
+                date_ranges['trades']['start'],
+                date_ranges['trades']['end'],
+                hours_per_chunk=4  # 4-hour chunks for memory management
             )
 
         # Print summary
