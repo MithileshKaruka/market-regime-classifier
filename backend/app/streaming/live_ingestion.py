@@ -523,7 +523,7 @@ class LiveDataIngestion:
                     self.current_bars[tf][symbol] = current_bar
                 else:
                     # Update existing bar
-                    current_bar = self.update_bar_with_quote(current_bar, quote, delta, bar_ts)
+                    current_bar = self.update_bar_with_quote(current_bar, quote, quote_delta, bar_ts)
                     self.current_bars[tf][symbol] = current_bar
 
                 # Skip if bar is None (invalid quote)
