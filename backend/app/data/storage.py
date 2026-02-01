@@ -175,6 +175,27 @@ class DuckDBStorage:
         else:
             columns.append(pl.lit(None).cast(pl.Int64).alias("cvd"))
 
+        # Trade flow columns (from trades schema)
+        if "trade_flow_ratio" in df.columns:
+            columns.append(pl.col("trade_flow_ratio"))
+        else:
+            columns.append(pl.lit(None).cast(pl.Float64).alias("trade_flow_ratio"))
+
+        if "buy_trades" in df.columns:
+            columns.append(pl.col("buy_trades"))
+        else:
+            columns.append(pl.lit(None).cast(pl.Int32).alias("buy_trades"))
+
+        if "sell_trades" in df.columns:
+            columns.append(pl.col("sell_trades"))
+        else:
+            columns.append(pl.lit(None).cast(pl.Int32).alias("sell_trades"))
+
+        if "large_trade_count" in df.columns:
+            columns.append(pl.col("large_trade_count"))
+        else:
+            columns.append(pl.lit(None).cast(pl.Int32).alias("large_trade_count"))
+
         df_insert = df.select(columns)
 
         # Insert into DuckDB
