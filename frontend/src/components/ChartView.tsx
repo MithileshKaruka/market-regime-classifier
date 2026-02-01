@@ -110,13 +110,19 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
 
   // Adjust UTC timestamp to browser's local time for chart display
   // lightweight-charts displays timestamps as-is, so we shift to local time
+  // For daily (1D) bars, skip adjustment since they represent full days not specific times
   const adjustToLocal = useCallback((utcTimestamp: number): number => {
+    // Skip timezone adjustment for daily bars - they should stay at midnight UTC
+    // Otherwise bars appear on the wrong date (e.g., Jan 16 00:00 UTC -> Jan 15 18:00 CST)
+    if (timeframe === '1D') {
+      return utcTimestamp
+    }
     const date = new Date(utcTimestamp * 1000)
     // getTimezoneOffset() returns minutes AHEAD of UTC (so CST=-360 becomes +360)
     // We subtract to shift from UTC to local
     const offsetMinutes = date.getTimezoneOffset()
     return utcTimestamp - (offsetMinutes * 60)
-  }, [])
+  }, [timeframe])
 
   // ============================================================================
   // WebSocket Real-time Updates
