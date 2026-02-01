@@ -119,19 +119,48 @@ def filter_ohlcv_data(df: pl.DataFrame) -> pl.DataFrame:
 
 
 def resample_to_timeframe(df: pl.DataFrame, timeframe: str) -> pl.DataFrame:
-    """Resample 1-minute OHLCV to higher timeframe"""
+    """Resample 1-minute OHLCV to higher timeframe
+
+    For 4H and 1D timeframes, uses CME session boundaries (18:00 ET / 23:00 UTC)
+    instead of UTC midnight to properly align trading days.
+    """
     timeframe_map = {"5M": "5m", "15M": "15m", "1H": "1h", "4H": "4h", "1D": "1d"}
     duration = timeframe_map[timeframe]
 
-    df_resampled = df.group_by_dynamic(
-        "ts_event", every=duration, closed="left", label="left"
-    ).agg([
-        pl.col("open").first(),
-        pl.col("high").max(),
-        pl.col("low").min(),
-        pl.col("close").last(),
-        pl.col("volume").sum(),
-    ])
+    # For 4H and 1D, use CME session boundaries (18:00 ET = 23:00 UTC)
+    # Shift timestamps by 1 hour so that 23:00 UTC becomes 00:00, then bucket, then shift back
+    # This aligns daily bars to CME trading sessions instead of UTC midnight
+    if timeframe in ("4H", "1D"):
+        # CME session starts at 23:00 UTC (18:00 ET)
+        # Shift forward by 1 hour: 23:00 UTC -> 00:00 (next day)
+        df_shifted = df.with_columns([
+            (pl.col("ts_event") + pl.duration(hours=1)).alias("ts_shifted")
+        ])
+
+        df_resampled = df_shifted.group_by_dynamic(
+            "ts_shifted", every=duration, closed="left", label="left"
+        ).agg([
+            pl.col("open").first(),
+            pl.col("high").max(),
+            pl.col("low").min(),
+            pl.col("close").last(),
+            pl.col("volume").sum(),
+        ])
+
+        # Shift timestamps back to original timezone
+        df_resampled = df_resampled.with_columns([
+            (pl.col("ts_shifted") - pl.duration(hours=1)).alias("ts_event")
+        ]).drop("ts_shifted")
+    else:
+        df_resampled = df.group_by_dynamic(
+            "ts_event", every=duration, closed="left", label="left"
+        ).agg([
+            pl.col("open").first(),
+            pl.col("high").max(),
+            pl.col("low").min(),
+            pl.col("close").last(),
+            pl.col("volume").sum(),
+        ])
 
     df_resampled = df_resampled.drop_nulls()
 
