@@ -234,9 +234,22 @@ class LiveDataIngestion:
         elif timeframe == "1H":
             return ts.replace(minute=0, second=0, microsecond=0)
         elif timeframe == "4H":
-            return ts.replace(hour=(ts.hour // 4) * 4, minute=0, second=0, microsecond=0)
+            # Align to CME session boundaries (18:00 ET = 23:00 UTC)
+            # Shift by 1 hour so 23:00 UTC -> 00:00, bucket, then shift back
+            shifted_hour = (ts.hour + 1) % 24
+            bucket_hour = (shifted_hour // 4) * 4
+            # Shift back: subtract 1 hour from bucket
+            actual_hour = (bucket_hour - 1) % 24
+            return ts.replace(hour=actual_hour, minute=0, second=0, microsecond=0)
         elif timeframe == "1D":
-            return ts.replace(hour=0, minute=0, second=0, microsecond=0)
+            # Align to CME session start (18:00 ET = 23:00 UTC)
+            # Daily bar starts at 23:00 UTC previous day
+            if ts.hour >= 23:
+                return ts.replace(hour=23, minute=0, second=0, microsecond=0)
+            else:
+                # Before 23:00 UTC belongs to previous day's session
+                prev_day = ts - timedelta(days=1)
+                return prev_day.replace(hour=23, minute=0, second=0, microsecond=0)
         return ts
 
     def extract_quote(self, record) -> dict:

@@ -505,8 +505,21 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
       try {
         setLoading(true)
 
-        // Always reset on timeframe change
+        // Always reset on timeframe change - clear chart immediately to prevent stale data
         if (isTimeframeChange) {
+          // Clear chart series data immediately (prevents showing old timeframe data)
+          candlestickSeriesRef.current?.setData([])
+          volumeSeriesRef.current?.setData([])
+          // Clear markers
+          candlestickSeriesRef.current?.setMarkers([])
+          // Clear indicator series
+          indicatorSeriesRef.current.forEach(series => series.setData([]))
+          // Clear price lines
+          priceLinesRef.current.forEach(line => {
+            candlestickSeriesRef.current?.removePriceLine(line)
+          })
+          priceLinesRef.current = []
+          // Clear state
           setLoadedBars([])
           loadedBarsRef.current = []
         }
