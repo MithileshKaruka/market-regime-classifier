@@ -176,6 +176,9 @@ class LiveDataIngestion:
 
         This ensures the first tick after startup has a reference price
         to filter against, preventing spikes at service restart.
+
+        If the last bar is too old (>2 hours), the reference is not loaded
+        to allow the market to establish a new baseline after gaps.
         """
         try:
             with DuckDBStorage(db_path=self.db_path) as storage:
@@ -184,14 +187,26 @@ class LiveDataIngestion:
                         # Query for normalized symbol (MNQ, not MNQH26 or MNQ.FUT)
                         db_symbol = normalize_symbol(symbol)
                         query = f"""
-                            SELECT close FROM ohlcv_ticks
+                            SELECT close, timestamp FROM ohlcv_ticks
                             WHERE symbol = '{db_symbol}' AND timeframe = '{tf}'
                             ORDER BY timestamp DESC LIMIT 1
                         """
                         result = storage.conn.execute(query).fetchone()
                         if result:
-                            self.last_bar_close[tf][symbol] = result[0]
-                            logger.info(f"Loaded last close for {tf}:{symbol} = {result[0]:.2f}")
+                            close_price, bar_timestamp = result[0], result[1]
+                            # Check if the bar is too stale (>2 hours old)
+                            # If so, don't use it as reference - market may have moved legitimately
+                            now = datetime.now(timezone.utc)
+                            if hasattr(bar_timestamp, 'tzinfo') and bar_timestamp.tzinfo is None:
+                                bar_timestamp = bar_timestamp.replace(tzinfo=timezone.utc)
+                            bar_age = now - bar_timestamp
+                            max_age = timedelta(hours=2)
+
+                            if bar_age <= max_age:
+                                self.last_bar_close[tf][symbol] = close_price
+                                logger.info(f"Loaded last close for {tf}:{symbol} = {close_price:.2f} (age: {bar_age})")
+                            else:
+                                logger.warning(f"Skipping stale reference for {tf}:{symbol} = {close_price:.2f} (age: {bar_age} > {max_age})")
         except Exception as e:
             logger.warning(f"Could not load last bar close from DB: {e}")
 
