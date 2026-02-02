@@ -162,8 +162,22 @@ def evaluate_bias(state: AgentState) -> AgentState:
             "messages": [{"role": "system", "content": "No market data to evaluate"}],
         }
 
-    # Convert list of dicts back to DataFrame
-    df = pl.DataFrame(market_data_list)
+    # Convert list of dicts back to DataFrame with explicit schema to handle nulls
+    # Use infer_schema_length=None to scan all rows for proper type inference
+    try:
+        df = pl.DataFrame(market_data_list, infer_schema_length=None)
+    except Exception:
+        # Fallback: define schema explicitly if inference fails
+        df = pl.DataFrame(market_data_list, schema={
+            "timestamp": pl.Datetime,
+            "open": pl.Float64,
+            "high": pl.Float64,
+            "low": pl.Float64,
+            "close": pl.Float64,
+            "volume": pl.Int64,
+            "dom_imbalance": pl.Float64,
+            "instant_delta": pl.Int64,
+        })
     logger.info(f"[Evaluate] Calculating bias score from {len(df)} bars")
 
     # Add depth columns
