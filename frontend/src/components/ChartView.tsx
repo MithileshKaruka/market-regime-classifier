@@ -71,6 +71,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const indicatorSeriesRef = useRef<Map<string, ISeriesApi<'Line'>>>(new Map())
   const priceLinesRef = useRef<any[]>([])
+  const isChartDisposedRef = useRef<boolean>(false)  // Track disposal to prevent updates on removed chart
   const [loading, setLoading] = useState(true)
   const [selectedIndicators, setSelectedIndicators] = useState<string[]>([])
   const [showIndicatorMenu, setShowIndicatorMenu] = useState(false)
@@ -137,30 +138,39 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
 
   // Handle real-time bar updates from WebSocket
   const handleBarUpdate = useCallback((data: BarData) => {
-    console.log(`[ChartView] handleBarUpdate called:`, data)
+    // Guard against updates after chart disposal
+    if (isChartDisposedRef.current) {
+      console.log(`[ChartView] Chart disposed, skipping update`)
+      return
+    }
     if (!candlestickSeriesRef.current || !volumeSeriesRef.current) {
       console.log(`[ChartView] Series refs not ready`)
       return
     }
 
-    const time = parseTimestamp(data.timestamp)
-    console.log(`[ChartView] Updating chart at time=${time}, close=${data.close}`)
+    try {
+      const time = parseTimestamp(data.timestamp)
+      console.log(`[ChartView] Updating chart at time=${time}, close=${data.close}`)
 
-    // Update candlestick (creates new bar or updates existing rightmost bar)
-    candlestickSeriesRef.current.update({
-      time: time as any,
-      open: data.open,
-      high: data.high,
-      low: data.low,
-      close: data.close,
-    })
+      // Update candlestick (creates new bar or updates existing rightmost bar)
+      candlestickSeriesRef.current.update({
+        time: time as any,
+        open: data.open,
+        high: data.high,
+        low: data.low,
+        close: data.close,
+      })
 
-    // Update volume
-    volumeSeriesRef.current.update({
-      time: time as any,
-      value: data.volume,
-      color: data.close >= data.open ? COLORS.chart.volumeUp : COLORS.chart.volumeDown,
-    })
+      // Update volume
+      volumeSeriesRef.current.update({
+        time: time as any,
+        value: data.volume,
+        color: data.close >= data.open ? COLORS.chart.volumeUp : COLORS.chart.volumeDown,
+      })
+    } catch (err) {
+      // Silently ignore errors from disposed chart or timing issues
+      console.log(`[ChartView] Update error (chart may be disposed):`, err)
+    }
   }, [parseTimestamp])
 
   // Handle bar close - finalize the bar and update state
@@ -222,6 +232,9 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
 
   useEffect(() => {
     if (!chartContainerRef.current) return
+
+    // Reset disposal flag when creating new chart
+    isChartDisposedRef.current = false
 
     // Create chart (timestamps already adjusted to Chicago timezone in parseTimestamp)
     const chart = createChart(chartContainerRef.current, {
@@ -322,8 +335,16 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
 
     // Cleanup
     return () => {
+      // Mark chart as disposed BEFORE removing to prevent race conditions
+      isChartDisposedRef.current = true
       window.removeEventListener('resize', handleResize)
       chart.remove()
+      // Clear refs to prevent stale references
+      chartRef.current = null
+      candlestickSeriesRef.current = null
+      volumeSeriesRef.current = null
+      indicatorSeriesRef.current.clear()
+      priceLinesRef.current = []
     }
   }, [])
 
@@ -354,47 +375,55 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
 
   // Helper function to update chart with bars (applies Chicago timezone adjustment)
   const updateChartWithBars = useCallback((bars: ChartBar[]) => {
+    // Guard against updates after chart disposal
+    if (isChartDisposedRef.current) return
     if (!candlestickSeriesRef.current || !volumeSeriesRef.current) return
 
-    // Sort by time
-    const sortedBars = [...bars].sort((a, b) => a.time - b.time)
+    try {
+      // Sort by time
+      const sortedBars = [...bars].sort((a, b) => a.time - b.time)
 
-    // Prepare candlestick data (adjust timestamp to Chicago timezone)
-    const candlestickData = sortedBars.map((bar) => ({
-      time: adjustToLocal(bar.time) as any,
-      open: bar.open,
-      high: bar.high,
-      low: bar.low,
-      close: bar.close,
-    }))
+      // Prepare candlestick data (adjust timestamp to Chicago timezone)
+      const candlestickData = sortedBars.map((bar) => ({
+        time: adjustToLocal(bar.time) as any,
+        open: bar.open,
+        high: bar.high,
+        low: bar.low,
+        close: bar.close,
+      }))
 
-    // Prepare volume data (adjust timestamp to Chicago timezone)
-    const volumeData = sortedBars.map((bar) => ({
-      time: adjustToLocal(bar.time) as any,
-      value: bar.volume,
-      color: bar.close >= bar.open ? COLORS.chart.volumeUp : COLORS.chart.volumeDown,
-    }))
+      // Prepare volume data (adjust timestamp to Chicago timezone)
+      const volumeData = sortedBars.map((bar) => ({
+        time: adjustToLocal(bar.time) as any,
+        value: bar.volume,
+        color: bar.close >= bar.open ? COLORS.chart.volumeUp : COLORS.chart.volumeDown,
+      }))
 
-    candlestickSeriesRef.current.setData(candlestickData)
-    volumeSeriesRef.current.setData(volumeData)
+      candlestickSeriesRef.current.setData(candlestickData)
+      volumeSeriesRef.current.setData(volumeData)
 
-    // Update indicator series (adjust timestamp to Chicago timezone)
-    ALL_INDICATOR_KEYS.forEach(key => {
-      const series = indicatorSeriesRef.current.get(key)
-      if (series) {
-        const data = sortedBars
-          .filter(bar => (bar as any)[key] != null)
-          .map(bar => ({
-            time: adjustToLocal(bar.time) as any,
-            value: (bar as any)[key],
-          }))
-        series.setData(data)
-      }
-    })
+      // Update indicator series (adjust timestamp to Chicago timezone)
+      ALL_INDICATOR_KEYS.forEach(key => {
+        const series = indicatorSeriesRef.current.get(key)
+        if (series) {
+          const data = sortedBars
+            .filter(bar => (bar as any)[key] != null)
+            .map(bar => ({
+              time: adjustToLocal(bar.time) as any,
+              value: (bar as any)[key],
+            }))
+          series.setData(data)
+        }
+      })
+    } catch (err) {
+      console.log(`[ChartView] setData error (chart may be disposed):`, err)
+    }
   }, [adjustToLocal])
 
   // Load more historical data (uses refs to avoid stale closure issues)
   const loadMoreData = async () => {
+    // Guard against loading after chart disposal
+    if (isChartDisposedRef.current) return
     if (isLoadingMoreRef.current || loadedBarsRef.current.length >= totalBarsRef.current) return
 
     setIsLoadingMore(true)
@@ -462,6 +491,8 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
   // Fetch data when timeframe changes OR when we need indicator data we don't have
   useEffect(() => {
     const fetchChartData = async () => {
+      // Guard against fetching after chart disposal
+      if (isChartDisposedRef.current) return
       if (!candlestickSeriesRef.current || !volumeSeriesRef.current) return
 
       // Check if this is a timeframe change
@@ -512,6 +543,12 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
         }
 
         console.log(`[Chart] Loaded ${bars.length} bars, ${signals.length} signals, S/R: ${srData ? 'yes' : 'no'}`)
+
+        // Check if chart was disposed during fetch
+        if (isChartDisposedRef.current) {
+          console.log(`[ChartView] Chart disposed during fetch, aborting render`)
+          return
+        }
 
         // Update state
         setTotalBars(data.total_count)
@@ -727,13 +764,16 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
 
   // Apply orderflow signal markers to chart
   useEffect(() => {
+    // Guard against updates after chart disposal
+    if (isChartDisposedRef.current) return
     if (!candlestickSeriesRef.current) return
 
-    if (!showOrderflowSignals || orderflowSignals.length === 0 || selectedSignalTypes.length === 0) {
-      // Clear markers when toggled off, no signals, or no types selected
-      candlestickSeriesRef.current.setMarkers([])
-      return
-    }
+    try {
+      if (!showOrderflowSignals || orderflowSignals.length === 0 || selectedSignalTypes.length === 0) {
+        // Clear markers when toggled off, no signals, or no types selected
+        candlestickSeriesRef.current.setMarkers([])
+        return
+      }
 
     // Filter signals by selected types and convert to chart markers
     const filteredSignals = orderflowSignals.filter(s => selectedSignalTypes.includes(s.signal_type))
@@ -809,8 +849,11 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
     // Sort markers by time (required by lightweight-charts)
     markers.sort((a, b) => (a.time as number) - (b.time as number))
 
-    candlestickSeriesRef.current.setMarkers(markers as any)
-    console.log(`[Orderflow] Applied ${markers.length} markers to chart (${selectedSignalTypes.length} types selected)`)
+      candlestickSeriesRef.current.setMarkers(markers as any)
+      console.log(`[Orderflow] Applied ${markers.length} markers to chart (${selectedSignalTypes.length} types selected)`)
+    } catch (err) {
+      console.log(`[ChartView] setMarkers error (chart may be disposed):`, err)
+    }
   }, [orderflowSignals, showOrderflowSignals, selectedSignalTypes, adjustToLocal])
 
   return (

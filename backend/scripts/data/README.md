@@ -62,6 +62,26 @@ ps aux | grep preload_historical
 | `--trades-days` | Days of trades data | 14 |
 | `--keep-files` | Keep downloaded DBN files | false |
 
+### Live Ingestion Integration
+
+The preload script automatically **pauses live ingestion** before loading data and **resumes** after completion. This prevents database write conflicts.
+
+- If the backend is running, ingestion is paused via `/api/admin/ingestion/pause`
+- After data load completes (or on error), ingestion resumes via `/api/admin/ingestion/resume`
+- If the backend is not running, the script proceeds without pausing
+
+**Manual control** (if needed):
+```bash
+# Pause live ingestion
+curl -X POST http://localhost:8000/api/admin/ingestion/pause
+
+# Check status
+curl http://localhost:8000/api/admin/ingestion/status
+
+# Resume live ingestion
+curl -X POST http://localhost:8000/api/admin/ingestion/resume
+```
+
 ### Weekly Maintenance Schedule
 
 Recommended weekly reload to refresh order flow data:
@@ -69,4 +89,4 @@ Recommended weekly reload to refresh order flow data:
 - **OHLCV**: 5 years (stable, rarely needs full reload)
 - **MBP/Trades**: 14 days (rolling window for accurate DOM/delta)
 
-Run every weekend when markets are closed.
+Run every weekend when markets are closed (CME maintenance: Sunday 5-6pm ET).

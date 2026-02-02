@@ -23,6 +23,9 @@ Usage:
 """
 import sys
 import argparse
+import urllib.request
+import urllib.error
+import json
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -32,6 +35,72 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import databento as db
 from app.data.storage import DuckDBStorage
 from config import get_secrets
+
+
+# Live ingestion control API
+BACKEND_URL = "http://localhost:8000"
+
+
+def pause_live_ingestion() -> bool:
+    """Pause live ingestion before data load
+
+    Returns True if paused successfully, False if failed or already paused.
+    """
+    try:
+        data = json.dumps({"reason": "historical_preload"}).encode('utf-8')
+        req = urllib.request.Request(
+            f"{BACKEND_URL}/api/admin/ingestion/pause",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            result = json.loads(response.read().decode('utf-8'))
+            if result.get("paused"):
+                print("  Live ingestion PAUSED")
+                return True
+    except urllib.error.HTTPError as e:
+        if e.code == 400:
+            # Already paused
+            print("  Live ingestion already paused")
+            return True
+        print(f"  Warning: Could not pause ingestion (HTTP {e.code})")
+    except urllib.error.URLError:
+        print("  Note: Backend not running - no live ingestion to pause")
+    except Exception as e:
+        print(f"  Warning: Could not pause ingestion: {e}")
+    return False
+
+
+def resume_live_ingestion() -> bool:
+    """Resume live ingestion after data load
+
+    Returns True if resumed successfully, False if failed.
+    """
+    try:
+        req = urllib.request.Request(
+            f"{BACKEND_URL}/api/admin/ingestion/resume",
+            data=b"",
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            result = json.loads(response.read().decode('utf-8'))
+            if not result.get("paused"):
+                print("  Live ingestion RESUMED")
+                return True
+    except urllib.error.HTTPError as e:
+        if e.code == 400:
+            # Already running
+            print("  Live ingestion already running")
+            return True
+        print(f"  Warning: Could not resume ingestion (HTTP {e.code})")
+    except urllib.error.URLError:
+        print("  Note: Backend not running - no ingestion to resume")
+    except Exception as e:
+        print(f"  Warning: Could not resume ingestion: {e}")
+    return False
+
 
 # Default configuration
 DEFAULT_OHLCV_YEARS = 5
@@ -778,40 +847,50 @@ Examples:
         output_dir = Path(__file__).parent.parent.parent / "data"
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Download and load OHLCV
-        if not args.mbp_only and not args.trades_only:
-            ohlcv_path = download_ohlcv(
-                api_key,
-                date_ranges['ohlcv']['start'],
-                date_ranges['ohlcv']['end'],
-                output_dir
-            )
-            if ohlcv_path:
-                load_ohlcv_file(ohlcv_path)
-                if not args.keep_files:
-                    ohlcv_path.unlink()
-                    print(f"  Cleaned up: {ohlcv_path.name}")
+        # Pause live ingestion before database writes
+        print("\nPausing live ingestion...")
+        pause_live_ingestion()
 
-        # Download and load MBP-1 (chunked to manage memory)
-        if not args.ohlcv_only and not args.trades_only:
-            download_and_load_mbp_chunked(
-                api_key,
-                date_ranges['mbp']['start'],
-                date_ranges['mbp']['end'],
-                hours_per_chunk=4  # 4-hour chunks for 8GB RAM
-            )
+        try:
+            # Download and load OHLCV
+            if not args.mbp_only and not args.trades_only:
+                ohlcv_path = download_ohlcv(
+                    api_key,
+                    date_ranges['ohlcv']['start'],
+                    date_ranges['ohlcv']['end'],
+                    output_dir
+                )
+                if ohlcv_path:
+                    load_ohlcv_file(ohlcv_path)
+                    if not args.keep_files:
+                        ohlcv_path.unlink()
+                        print(f"  Cleaned up: {ohlcv_path.name}")
 
-        # Download and load trades (for institutional activity signals)
-        if not args.ohlcv_only and not args.mbp_only:
-            download_and_load_trades_chunked(
-                api_key,
-                date_ranges['trades']['start'],
-                date_ranges['trades']['end'],
-                hours_per_chunk=4  # 4-hour chunks for memory management
-            )
+            # Download and load MBP-1 (chunked to manage memory)
+            if not args.ohlcv_only and not args.trades_only:
+                download_and_load_mbp_chunked(
+                    api_key,
+                    date_ranges['mbp']['start'],
+                    date_ranges['mbp']['end'],
+                    hours_per_chunk=4  # 4-hour chunks for 8GB RAM
+                )
 
-        # Print summary
-        print_summary()
+            # Download and load trades (for institutional activity signals)
+            if not args.ohlcv_only and not args.mbp_only:
+                download_and_load_trades_chunked(
+                    api_key,
+                    date_ranges['trades']['start'],
+                    date_ranges['trades']['end'],
+                    hours_per_chunk=4  # 4-hour chunks for memory management
+                )
+
+            # Print summary
+            print_summary()
+
+        finally:
+            # Resume live ingestion after data load (always, even on error)
+            print("\nResuming live ingestion...")
+            resume_live_ingestion()
 
         print("\n" + "=" * 60)
         print("  Preload Complete!")

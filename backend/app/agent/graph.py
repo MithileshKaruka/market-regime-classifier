@@ -448,11 +448,21 @@ async def run_agent(
         "messages": [],
     }
 
-    # Run the graph
-    final_state = trading_agent.invoke(initial_state)
+    try:
+        # Run the graph
+        final_state = trading_agent.invoke(initial_state)
 
-    # Clean up internal state (don't return serialized data to client)
-    if "_market_df" in final_state:
-        del final_state["_market_df"]
+        # Clean up internal state (don't return serialized data to client)
+        if "_market_df" in final_state:
+            del final_state["_market_df"]
 
-    return final_state
+        return final_state
+    except Exception as e:
+        logger.error(f"Agent execution error: {e}", exc_info=True)
+        # Return a fallback state on error
+        return {
+            **initial_state,
+            "action": TradeAction.WAIT.value,
+            "action_reason": f"Agent error: {str(e)}",
+            "messages": [{"role": "system", "content": f"Agent execution failed: {str(e)}"}],
+        }

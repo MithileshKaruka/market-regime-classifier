@@ -706,39 +706,64 @@ async def run_trading_agent(
     - EXIT_LONG / EXIT_SHORT: Close position
     - ADD_TO_LONG / ADD_TO_SHORT: Scale into position
     """
-    # Run the agent
-    result = await run_agent(
-        timeframe=timeframe,
-        symbol="MNQ",
-        current_position=position,
-        entry_price=entry_price,
-    )
+    try:
+        # Run the agent
+        result = await run_agent(
+            timeframe=timeframe,
+            symbol="MNQ",
+            current_position=position,
+            entry_price=entry_price,
+        )
 
-    # Extract message contents
-    messages = []
-    for msg in result.get("messages", []):
-        if isinstance(msg, dict):
-            messages.append(msg.get("content", ""))
-        elif hasattr(msg, "content"):
-            messages.append(msg.content)
+        # Extract message contents
+        messages = []
+        for msg in result.get("messages", []):
+            if isinstance(msg, dict):
+                messages.append(msg.get("content", ""))
+            elif hasattr(msg, "content"):
+                messages.append(msg.content)
 
-    return AgentDecisionResponse(
-        timestamp=result.get("timestamp", int(datetime.utcnow().timestamp())),
-        timeframe=timeframe,
-        symbol=result.get("symbol", "MNQ"),
-        current_price=result.get("current_price", 0),
-        bias_score=result.get("bias_score", 50),
-        agent_mode=result.get("agent_mode", "NEUTRAL"),
-        confidence=result.get("confidence", "LOW"),
-        trend_score=result.get("trend_score", 50),
-        intensity_score=result.get("intensity_score", 50),
-        orderflow_score=result.get("orderflow_score", 50),
-        position=result.get("position", "FLAT"),
-        entry_price=result.get("entry_price"),
-        action=result.get("action", "WAIT"),
-        action_reason=result.get("action_reason", ""),
-        stop_loss=result.get("stop_loss"),
-        take_profit=result.get("take_profit"),
-        iterations=result.get("iteration", 0),
-        messages=messages,
-    )
+        return AgentDecisionResponse(
+            timestamp=result.get("timestamp", int(datetime.utcnow().timestamp())),
+            timeframe=timeframe,
+            symbol=result.get("symbol", "MNQ"),
+            current_price=result.get("current_price", 0),
+            bias_score=result.get("bias_score", 50),
+            agent_mode=result.get("agent_mode", "NEUTRAL"),
+            confidence=result.get("confidence", "LOW"),
+            trend_score=result.get("trend_score", 50),
+            intensity_score=result.get("intensity_score", 50),
+            orderflow_score=result.get("orderflow_score", 50),
+            position=result.get("position", "FLAT"),
+            entry_price=result.get("entry_price"),
+            action=result.get("action", "WAIT"),
+            action_reason=result.get("action_reason", ""),
+            stop_loss=result.get("stop_loss"),
+            take_profit=result.get("take_profit"),
+            iterations=result.get("iteration", 0),
+            messages=messages,
+        )
+    except Exception as e:
+        # Return a safe fallback response on any error
+        import logging
+        logging.getLogger(__name__).error(f"Agent endpoint error: {e}", exc_info=True)
+        return AgentDecisionResponse(
+            timestamp=int(datetime.utcnow().timestamp()),
+            timeframe=timeframe,
+            symbol="MNQ",
+            current_price=0,
+            bias_score=50,
+            agent_mode="NEUTRAL",
+            confidence="LOW",
+            trend_score=50,
+            intensity_score=50,
+            orderflow_score=50,
+            position=position,
+            entry_price=entry_price,
+            action="WAIT",
+            action_reason=f"Service temporarily unavailable: {str(e)}",
+            stop_loss=None,
+            take_profit=None,
+            iterations=0,
+            messages=[f"Error: {str(e)}"],
+        )

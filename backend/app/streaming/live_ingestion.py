@@ -46,6 +46,7 @@ from app.classifiers.regime import RegimeClassifier
 from app.data.storage import DuckDBStorage
 from app.streaming.live_cache import get_cache
 from app.api.websocket import get_manager as get_ws_manager
+from app.api.admin import is_ingestion_paused
 from config import get_config, get_secrets, get_databento_config
 
 logging.basicConfig(
@@ -677,8 +678,20 @@ class LiveDataIngestion:
 
             tick_count = 0
             last_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+            was_paused = False
 
             async for record in client:
+                # Check if ingestion is paused (e.g., during historical data reload)
+                if is_ingestion_paused():
+                    if not was_paused:
+                        logger.warning("Ingestion PAUSED - skipping tick processing")
+                        was_paused = True
+                    await asyncio.sleep(1)  # Don't spin-wait
+                    continue
+                elif was_paused:
+                    logger.warning("Ingestion RESUMED - processing ticks")
+                    was_paused = False
+
                 record_type = type(record).__name__
 
                 if record_type == "SymbolMappingMsg":
