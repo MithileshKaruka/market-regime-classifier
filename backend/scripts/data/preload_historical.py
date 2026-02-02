@@ -26,6 +26,8 @@ import argparse
 import urllib.request
 import urllib.error
 import json
+import os
+import shutil
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -35,6 +37,18 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import databento as db
 from app.data.storage import DuckDBStorage
 from config import get_secrets
+
+
+# Database paths
+def get_db_paths():
+    """Get database file paths"""
+    backend_dir = Path(__file__).parent.parent.parent
+    data_dir = backend_dir / "data"
+    return {
+        'main': data_dir / "market_data.duckdb",
+        'new': data_dir / "market_data_new.duckdb",
+        'backup': data_dir / "market_data_backup.duckdb",
+    }
 
 
 # Live ingestion control API
@@ -100,6 +114,225 @@ def resume_live_ingestion() -> bool:
     except Exception as e:
         print(f"  Warning: Could not resume ingestion: {e}")
     return False
+
+
+def verify_database(db_path: Path, date_ranges: dict) -> dict:
+    """Verify loaded data in database
+
+    Args:
+        db_path: Path to database file
+        date_ranges: Expected date ranges from get_date_ranges()
+
+    Returns:
+        Dict with verification results
+    """
+    import duckdb
+
+    print(f"\nVerifying database: {db_path}")
+    results = {
+        'valid': True,
+        'errors': [],
+        'ohlcv': {},
+        'summary': {},
+    }
+
+    if not db_path.exists():
+        results['valid'] = False
+        results['errors'].append(f"Database file not found: {db_path}")
+        return results
+
+    try:
+        conn = duckdb.connect(str(db_path), read_only=True)
+
+        # Check OHLCV data per timeframe
+        timeframes = ['5M', '15M', '1H', '4H', '1D']
+        for tf in timeframes:
+            query = f"""
+                SELECT
+                    COUNT(*) as count,
+                    MIN(timestamp) as min_ts,
+                    MAX(timestamp) as max_ts
+                FROM ohlcv_ticks
+                WHERE symbol = 'MNQ' AND timeframe = '{tf}'
+            """
+            result = conn.execute(query).fetchone()
+            results['ohlcv'][tf] = {
+                'count': result[0],
+                'min_ts': str(result[1]) if result[1] else None,
+                'max_ts': str(result[2]) if result[2] else None,
+            }
+            print(f"  {tf}: {result[0]:,} bars ({result[1]} to {result[2]})")
+
+            # Validate minimum row counts
+            min_expected = {'5M': 100, '15M': 50, '1H': 20, '4H': 5, '1D': 1}
+            if result[0] < min_expected.get(tf, 1):
+                results['errors'].append(f"{tf} has only {result[0]} bars (expected >= {min_expected[tf]})")
+                results['valid'] = False
+
+        # Total summary
+        total_query = "SELECT COUNT(*) FROM ohlcv_ticks WHERE symbol = 'MNQ'"
+        total_count = conn.execute(total_query).fetchone()[0]
+        results['summary']['total_ohlcv'] = total_count
+        print(f"  Total OHLCV bars: {total_count:,}")
+
+        conn.close()
+
+    except Exception as e:
+        results['valid'] = False
+        results['errors'].append(f"Database error: {e}")
+        print(f"  ERROR: {e}")
+
+    if results['valid']:
+        print("  ✓ Verification PASSED")
+    else:
+        print(f"  ✗ Verification FAILED: {results['errors']}")
+
+    return results
+
+
+def copy_live_ingested_bars(source_db: Path, target_db: Path) -> dict:
+    """Copy live-ingested bars from source DB to target DB
+
+    Copies any bars from source that are newer than the latest bar in target.
+    This preserves live-ingested data that fills the gap between historical
+    data and the current time.
+
+    Args:
+        source_db: Current database with live-ingested bars
+        target_db: New database with historical data
+
+    Returns:
+        Dict with copy results (bars_copied per timeframe)
+    """
+    import duckdb
+
+    print(f"\nCopying live-ingested bars from current DB...")
+    print(f"  Source: {source_db}")
+    print(f"  Target: {target_db}")
+
+    results = {
+        'total_copied': 0,
+        'by_timeframe': {},
+    }
+
+    if not source_db.exists():
+        print("  Source DB not found - nothing to copy")
+        return results
+
+    if not target_db.exists():
+        print("  Target DB not found - cannot copy")
+        return results
+
+    try:
+        # Connect to both databases
+        source_conn = duckdb.connect(str(source_db), read_only=True)
+        target_conn = duckdb.connect(str(target_db))
+
+        timeframes = ['5M', '15M', '1H', '4H', '1D']
+
+        for tf in timeframes:
+            # Get latest timestamp in target (historical data endpoint)
+            target_max = target_conn.execute(f"""
+                SELECT MAX(timestamp) FROM ohlcv_ticks
+                WHERE symbol = 'MNQ' AND timeframe = '{tf}'
+            """).fetchone()[0]
+
+            if target_max is None:
+                print(f"  {tf}: No data in target - skipping")
+                continue
+
+            # Get bars from source that are newer than target's max
+            newer_bars = source_conn.execute(f"""
+                SELECT * FROM ohlcv_ticks
+                WHERE symbol = 'MNQ'
+                  AND timeframe = '{tf}'
+                  AND timestamp > '{target_max}'
+                ORDER BY timestamp
+            """).fetchdf()
+
+            if len(newer_bars) == 0:
+                print(f"  {tf}: No newer bars to copy (latest: {target_max})")
+                results['by_timeframe'][tf] = 0
+                continue
+
+            # Insert newer bars into target
+            # Convert to polars for DuckDB insert
+            import polars as pl
+            df_newer = pl.from_pandas(newer_bars)
+
+            target_conn.execute("INSERT OR REPLACE INTO ohlcv_ticks SELECT * FROM df_newer")
+            target_conn.commit()
+
+            copied_count = len(df_newer)
+            results['by_timeframe'][tf] = copied_count
+            results['total_copied'] += copied_count
+
+            min_ts = newer_bars['timestamp'].min()
+            max_ts = newer_bars['timestamp'].max()
+            print(f"  {tf}: Copied {copied_count} bars ({min_ts} to {max_ts})")
+
+        source_conn.close()
+        target_conn.close()
+
+        print(f"  Total bars copied: {results['total_copied']}")
+
+    except Exception as e:
+        print(f"  ERROR copying bars: {e}")
+        import traceback
+        traceback.print_exc()
+
+    return results
+
+
+def swap_databases() -> bool:
+    """Swap new database with existing database
+
+    This performs:
+    1. Rename market_data.duckdb -> market_data_backup.duckdb
+    2. Rename market_data_new.duckdb -> market_data.duckdb
+
+    Returns True if swap succeeded, False if failed.
+    """
+    paths = get_db_paths()
+
+    print("\nSwapping databases...")
+
+    # Check new DB exists
+    if not paths['new'].exists():
+        print(f"  ERROR: New database not found: {paths['new']}")
+        return False
+
+    try:
+        # Remove old backup if exists
+        if paths['backup'].exists():
+            print(f"  Removing old backup: {paths['backup']}")
+            paths['backup'].unlink()
+
+        # Backup current DB (if exists)
+        if paths['main'].exists():
+            print(f"  Backing up: {paths['main']} -> {paths['backup']}")
+            shutil.move(str(paths['main']), str(paths['backup']))
+
+        # Promote new DB
+        print(f"  Promoting: {paths['new']} -> {paths['main']}")
+        shutil.move(str(paths['new']), str(paths['main']))
+
+        print("  ✓ Database swap completed!")
+        return True
+
+    except Exception as e:
+        print(f"  ERROR during swap: {e}")
+
+        # Try to restore backup if main DB was moved
+        if not paths['main'].exists() and paths['backup'].exists():
+            print("  Attempting to restore backup...")
+            try:
+                shutil.move(str(paths['backup']), str(paths['main']))
+                print("  Backup restored")
+            except Exception as restore_e:
+                print(f"  CRITICAL: Could not restore backup: {restore_e}")
+
+        return False
 
 
 # Default configuration
@@ -312,8 +545,13 @@ def download_mbp(api_key: str, start: str, end: str, output_dir: Path) -> Option
         return None
 
 
-def load_ohlcv_file(file_path: Path):
-    """Load OHLCV file into database"""
+def load_ohlcv_file(file_path: Path, db_path: Optional[Path] = None):
+    """Load OHLCV file into database
+
+    Args:
+        file_path: Path to DBN file
+        db_path: Optional custom database path (default: main database)
+    """
     from scripts.data.load_historical_data import (
         load_ohlcv_from_dbn,
         filter_ohlcv_data,
@@ -324,8 +562,10 @@ def load_ohlcv_file(file_path: Path):
     )
 
     print(f"\nLoading OHLCV into database...")
+    if db_path:
+        print(f"  Target: {db_path}")
 
-    with DuckDBStorage() as storage:
+    with DuckDBStorage(db_path=str(db_path) if db_path else None) as storage:
         ensure_ohlcv_table(storage)
 
         # Clear existing OHLCV data for fresh import
@@ -361,7 +601,7 @@ def load_mbp_file(file_path: Path, chunk_size: int = 1_000_000):
     print("  Or run download_and_load_mbp_chunked() for streaming load")
 
 
-def download_and_load_trades_chunked(api_key: str, start_date: str, end_date: str, hours_per_chunk: int = 4):
+def download_and_load_trades_chunked(api_key: str, start_date: str, end_date: str, hours_per_chunk: int = 4, db_path: Optional[Path] = None):
     """Download trades data and aggregate to update OHLCV bars with trade flow metrics
 
     This function downloads actual trade data (not quote-inferred) and updates
@@ -376,6 +616,7 @@ def download_and_load_trades_chunked(api_key: str, start_date: str, end_date: st
         start_date: Start date YYYY-MM-DD
         end_date: End date YYYY-MM-DD
         hours_per_chunk: Hours per download chunk (default 4)
+        db_path: Optional custom database path (default: main database)
     """
     import polars as pl
     import gc
@@ -397,7 +638,10 @@ def download_and_load_trades_chunked(api_key: str, start_date: str, end_date: st
 
     LARGE_TRADE_THRESHOLD = 50  # contracts
 
-    with DuckDBStorage() as storage:
+    if db_path:
+        print(f"  Target: {db_path}")
+
+    with DuckDBStorage(db_path=str(db_path) if db_path else None) as storage:
         client = db.Historical(api_key)
         total_trades = 0
         total_bars_updated = 0
@@ -507,7 +751,7 @@ def download_and_load_trades_chunked(api_key: str, start_date: str, end_date: st
         print("  Done!")
 
 
-def download_and_load_mbp_chunked(api_key: str, start_date: str, end_date: str, hours_per_chunk: int = 4):
+def download_and_load_mbp_chunked(api_key: str, start_date: str, end_date: str, hours_per_chunk: int = 4, db_path: Optional[Path] = None):
     """Download MBP data and aggregate directly to OHLCV bars (memory efficient)
 
     Args:
@@ -515,6 +759,7 @@ def download_and_load_mbp_chunked(api_key: str, start_date: str, end_date: str, 
         start_date: Start date YYYY-MM-DD
         end_date: End date YYYY-MM-DD
         hours_per_chunk: Hours per download chunk (default 4)
+        db_path: Optional custom database path (default: main database)
     """
     import polars as pl
     from scripts.data.load_historical_data import ensure_ohlcv_table
@@ -524,6 +769,9 @@ def download_and_load_mbp_chunked(api_key: str, start_date: str, end_date: str, 
     print(f"  Range: {start_date} to {end_date}")
     print(f"  Chunk size: {hours_per_chunk} hours")
     print(f"  (Aggregating directly - not storing raw ticks)")
+
+    if db_path:
+        print(f"  Target: {db_path}")
 
     start_dt = datetime.strptime(start_date, '%Y-%m-%d')
     end_dt = datetime.strptime(end_date, '%Y-%m-%d')
@@ -536,7 +784,7 @@ def download_and_load_mbp_chunked(api_key: str, start_date: str, end_date: str, 
         "1D": "1d",
     }
 
-    with DuckDBStorage() as storage:
+    with DuckDBStorage(db_path=str(db_path) if db_path else None) as storage:
         ensure_ohlcv_table(storage)
 
         client = db.Historical(api_key)
@@ -778,10 +1026,16 @@ Examples:
                         help=f'Days of trades data (default: {DEFAULT_TRADES_DAYS})')
     parser.add_argument('--keep-files', action='store_true',
                         help='Keep downloaded DBN files after loading')
+    parser.add_argument('--swap-db', action='store_true',
+                        help='Load into new DB file, verify, then swap (minimizes downtime)')
+    parser.add_argument('--download-only', action='store_true',
+                        help='Only download historical data into new DB (no copy, no swap)')
+    parser.add_argument('--copy-and-swap', action='store_true',
+                        help='Only copy ingestion data from current DB to new DB, then swap')
 
     args = parser.parse_args()
 
-    if not args.estimate and not args.load:
+    if not args.estimate and not args.load and not args.copy_and_swap:
         parser.print_help()
         return
 
@@ -789,7 +1043,64 @@ Examples:
     print("  Historical Data Preload Utility")
     print("=" * 60)
 
-    # Get API key
+    db_paths = get_db_paths()
+
+    # Handle --copy-and-swap mode (no download needed)
+    if args.copy_and_swap:
+        print("\n*** COPY-AND-SWAP MODE ***")
+        print("Copying ingestion data from current DB to new DB, then swapping")
+
+        # Check new DB exists
+        if not db_paths['new'].exists():
+            print(f"\n[ERROR] New database not found: {db_paths['new']}")
+            print("Run --download-only first to create the new database with historical data")
+            return
+
+        # Verify new DB before proceeding
+        print("\n" + "=" * 60)
+        print("  Verifying New Database")
+        print("=" * 60)
+        verification = verify_database(db_paths['new'], {})
+
+        if not verification['valid']:
+            print("\n*** VERIFICATION FAILED ***")
+            print("New database did not pass verification.")
+            return
+
+        # Copy live-ingested bars
+        print("\n" + "=" * 60)
+        print("  Copying Live-Ingested Bars")
+        print("=" * 60)
+        copy_result = copy_live_ingested_bars(db_paths['main'], db_paths['new'])
+
+        if copy_result['total_copied'] > 0:
+            print(f"\n  Copied {copy_result['total_copied']} live-ingested bars to new DB")
+
+        # Swap databases
+        print("\n" + "=" * 60)
+        print("  Swapping Databases (pausing ingestion briefly)")
+        print("=" * 60)
+
+        print("\nPausing live ingestion for swap...")
+        pause_live_ingestion()
+
+        try:
+            if swap_databases():
+                print("\n*** Database swap successful! ***")
+            else:
+                print("\n*** Database swap FAILED ***")
+                print("Check logs above for details.")
+                return
+        finally:
+            print("\nResuming live ingestion...")
+            resume_live_ingestion()
+
+        print("\n" + "=" * 60)
+        print("  Copy and Swap Complete!")
+        print("=" * 60)
+        return
+
+    # Get API key (needed for estimate and load)
     try:
         secrets = get_secrets()
         api_key = secrets.api_key
@@ -838,6 +1149,16 @@ Examples:
 
         print("\nNote: Run with --estimate first to check costs")
 
+        if args.download_only:
+            print("\n*** DOWNLOAD-ONLY MODE ***")
+            print("Data will be loaded into a NEW database file and verified.")
+            print("No copy or swap will be performed.")
+            print("Run --copy-and-swap later to copy ingestion data and swap.")
+        elif args.swap_db:
+            print("\n*** SWAP-DB MODE ***")
+            print("Data will be loaded into a NEW database file, verified,")
+            print("then swapped with the existing database (minimal downtime)")
+
         response = input("\nProceed? [y/N]: ").strip().lower()
         if response != 'y':
             print("Aborted.")
@@ -847,9 +1168,21 @@ Examples:
         output_dir = Path(__file__).parent.parent.parent / "data"
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Pause live ingestion before database writes
-        print("\nPausing live ingestion...")
-        pause_live_ingestion()
+        # Determine target database
+        use_new_db = args.swap_db or args.download_only
+        target_db = db_paths['new'] if use_new_db else None
+
+        if use_new_db:
+            # Remove any leftover new DB from previous failed run
+            if db_paths['new'].exists():
+                print(f"\nRemoving leftover new database: {db_paths['new']}")
+                db_paths['new'].unlink()
+
+            print(f"\n*** Loading data into NEW database: {target_db}")
+        else:
+            # Traditional mode: pause ingestion for entire load
+            print("\nPausing live ingestion...")
+            pause_live_ingestion()
 
         try:
             # Download and load OHLCV
@@ -861,7 +1194,7 @@ Examples:
                     output_dir
                 )
                 if ohlcv_path:
-                    load_ohlcv_file(ohlcv_path)
+                    load_ohlcv_file(ohlcv_path, db_path=target_db)
                     if not args.keep_files:
                         ohlcv_path.unlink()
                         print(f"  Cleaned up: {ohlcv_path.name}")
@@ -872,7 +1205,8 @@ Examples:
                     api_key,
                     date_ranges['mbp']['start'],
                     date_ranges['mbp']['end'],
-                    hours_per_chunk=4  # 4-hour chunks for 8GB RAM
+                    hours_per_chunk=4,  # 4-hour chunks for 8GB RAM
+                    db_path=target_db
                 )
 
             # Download and load trades (for institutional activity signals)
@@ -881,16 +1215,79 @@ Examples:
                     api_key,
                     date_ranges['trades']['start'],
                     date_ranges['trades']['end'],
-                    hours_per_chunk=4  # 4-hour chunks for memory management
+                    hours_per_chunk=4,  # 4-hour chunks for memory management
+                    db_path=target_db
                 )
 
-            # Print summary
-            print_summary()
+            # Post-download actions depend on mode
+            if args.download_only:
+                # Download-only: verify and stop
+                print("\n" + "=" * 60)
+                print("  Verifying New Database")
+                print("=" * 60)
+                verification = verify_database(target_db, date_ranges)
+
+                if not verification['valid']:
+                    print("\n*** VERIFICATION FAILED ***")
+                    print("New database did not pass verification.")
+                    print(f"New database kept at: {target_db}")
+                else:
+                    print("\n*** DOWNLOAD COMPLETE ***")
+                    print(f"Historical data ready at: {target_db}")
+                    print("\nNext steps:")
+                    print("  1. Wait for CME maintenance window")
+                    print("  2. Run: --copy-and-swap to copy ingestion data and swap")
+
+            elif args.swap_db:
+                # Full swap-db workflow: verify, copy, swap
+                print("\n" + "=" * 60)
+                print("  Verifying New Database")
+                print("=" * 60)
+                verification = verify_database(target_db, date_ranges)
+
+                if not verification['valid']:
+                    print("\n*** VERIFICATION FAILED ***")
+                    print("New database did not pass verification.")
+                    print("Keeping existing database unchanged.")
+                    print(f"New database kept at: {target_db}")
+                    return
+
+                # Copy live-ingested bars from current DB to new DB
+                print("\n" + "=" * 60)
+                print("  Copying Live-Ingested Bars")
+                print("=" * 60)
+                copy_result = copy_live_ingested_bars(db_paths['main'], target_db)
+
+                if copy_result['total_copied'] > 0:
+                    print(f"\n  Copied {copy_result['total_copied']} live-ingested bars to new DB")
+
+                # Swap databases (brief pause for file operations only)
+                print("\n" + "=" * 60)
+                print("  Swapping Databases (pausing ingestion briefly)")
+                print("=" * 60)
+
+                print("\nPausing live ingestion for swap...")
+                pause_live_ingestion()
+
+                try:
+                    if swap_databases():
+                        print("\n*** Database swap successful! ***")
+                    else:
+                        print("\n*** Database swap FAILED ***")
+                        print("Check logs above for details.")
+                        return
+                finally:
+                    print("\nResuming live ingestion...")
+                    resume_live_ingestion()
+            else:
+                # Traditional mode: print summary from main DB
+                print_summary()
 
         finally:
-            # Resume live ingestion after data load (always, even on error)
-            print("\nResuming live ingestion...")
-            resume_live_ingestion()
+            if not args.swap_db and not args.download_only:
+                # Traditional mode: resume ingestion
+                print("\nResuming live ingestion...")
+                resume_live_ingestion()
 
         print("\n" + "=" * 60)
         print("  Preload Complete!")

@@ -61,6 +61,64 @@ ps aux | grep preload_historical
 | `--mbp-days` | Days of MBP-1 data | 60 |
 | `--trades-days` | Days of trades data | 14 |
 | `--keep-files` | Keep downloaded DBN files | false |
+| `--swap-db` | Minimal downtime mode (see below) | false |
+| `--download-only` | Download to new DB only (no copy/swap) | false |
+| `--copy-and-swap` | Copy ingestion data and swap DBs | false |
+
+### Split Workflow (`--download-only` + `--copy-and-swap`)
+
+For maximum flexibility, split the process into two steps:
+
+**Step 1: Download historical data (run anytime, even during market hours)**
+```bash
+# Takes 1-2 hours, doesn't affect live system
+yes | docker exec -i market-regime-classifier-backend-1 python /app/scripts/data/preload_historical.py --load --download-only --ohlcv-years 5 --mbp-days 14 --trades-days 14 > /home/ubuntu/download_$(date +%Y%m%d).log 2>&1 &
+```
+
+**Step 2: Copy ingestion data and swap (run during CME close)**
+```bash
+# Takes ~30 seconds total
+docker exec -i market-regime-classifier-backend-1 python /app/scripts/data/preload_historical.py --copy-and-swap
+```
+
+**Workflow:**
+1. `--download-only`: Downloads historical data into `market_data_new.duckdb` and verifies
+2. Wait for CME maintenance window (Sunday 5-6pm ET or daily close)
+3. `--copy-and-swap`: Copies any live-ingested bars newer than historical, then swaps DBs
+
+**Benefits:**
+- Run the long download during market hours without affecting live ingestion
+- The swap itself only takes ~30 seconds during CME close
+- Perfect for weekday updates when you can't wait for weekend maintenance
+
+### Minimal Downtime Mode (`--swap-db`)
+
+The `--swap-db` flag enables a workflow that minimizes live ingestion downtime and can be run **any day of the week** (not just weekends):
+
+1. **Load into new database**: All data is downloaded and loaded into `market_data_new.duckdb`
+2. **Verify data**: Automatically checks row counts and date ranges
+3. **Copy live-ingested bars**: Copies any bars from current DB that are newer than the historical data (preserves the gap between Databento's latest data and now)
+4. **Swap databases**: Only pauses ingestion for ~20-30 seconds during the file swap:
+   - `market_data.duckdb` → `market_data_backup.duckdb`
+   - `market_data_new.duckdb` → `market_data.duckdb`
+5. **Resume ingestion**: Live data continues flowing
+
+```bash
+# Recommended for production (minimal downtime, works any day)
+yes | docker exec -i market-regime-classifier-backend-1 python /app/scripts/data/preload_historical.py --load --swap-db --ohlcv-years 5 --mbp-days 14 --trades-days 14 > /home/ubuntu/reload_$(date +%Y%m%d).log 2>&1 &
+```
+
+**Benefits:**
+- Live ingestion only paused for ~20-30 seconds (vs hours without `--swap-db`)
+- **Works on weekdays**: Copies live-ingested bars to preserve recent data
+- Automatic verification before swap prevents bad data from going live
+- Backup kept at `market_data_backup.duckdb` for rollback if needed
+
+**How the gap is handled:**
+- Databento historical data typically has ~1 day delay
+- Live ingestion writes bars to the current database in real-time
+- Before swapping, the script copies any bars from the current DB that are **newer** than the latest historical data
+- This ensures you don't lose weekend/recent data when swapping on a Monday or mid-week
 
 ### Live Ingestion Integration
 
