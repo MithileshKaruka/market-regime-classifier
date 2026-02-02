@@ -1205,7 +1205,7 @@ Examples:
                     api_key,
                     date_ranges['mbp']['start'],
                     date_ranges['mbp']['end'],
-                    hours_per_chunk=4,  # 4-hour chunks for 8GB RAM
+                    hours_per_chunk=2,  # 2-hour chunks to avoid OOM
                     db_path=target_db
                 )
 
@@ -1215,7 +1215,7 @@ Examples:
                     api_key,
                     date_ranges['trades']['start'],
                     date_ranges['trades']['end'],
-                    hours_per_chunk=4,  # 4-hour chunks for memory management
+                    hours_per_chunk=2,  # 2-hour chunks to avoid OOM
                     db_path=target_db
                 )
 
