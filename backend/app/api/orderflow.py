@@ -258,10 +258,11 @@ async def get_simplified_metrics():
         # Calculate daily VWAP from intraday bars (15M for precision)
         # Use today's bars only for true daily VWAP
         # Filter out spurious low-volume bars
+        # Use 5M timeframe for current_price (most granular, most up-to-date)
         vwap_df = storage.conn.execute("""
             SELECT
                 SUM((high + low + close) / 3 * volume) / SUM(volume) as vwap,
-                (SELECT close FROM ohlcv_ticks WHERE symbol = 'MNQ' AND volume > 100 ORDER BY timestamp DESC LIMIT 1) as current_price
+                (SELECT close FROM ohlcv_ticks WHERE symbol = 'MNQ' AND timeframe = '5M' AND volume > 100 ORDER BY timestamp DESC LIMIT 1) as current_price
             FROM ohlcv_ticks
             WHERE symbol = 'MNQ' AND timeframe = '15M' AND volume > 100
             AND DATE(timestamp) = (SELECT DATE(MAX(timestamp)) FROM ohlcv_ticks WHERE symbol = 'MNQ' AND timeframe = '15M' AND volume > 100)
@@ -272,7 +273,7 @@ async def get_simplified_metrics():
             vwap_df = storage.conn.execute("""
                 SELECT
                     SUM((high + low + close) / 3 * volume) / SUM(volume) as vwap,
-                    (SELECT close FROM ohlcv_ticks WHERE symbol = 'MNQ' AND volume > 100 ORDER BY timestamp DESC LIMIT 1) as current_price
+                    (SELECT close FROM ohlcv_ticks WHERE symbol = 'MNQ' AND timeframe = '5M' AND volume > 100 ORDER BY timestamp DESC LIMIT 1) as current_price
                 FROM ohlcv_ticks
                 WHERE symbol = 'MNQ' AND timeframe = '1H' AND volume > 100
                 AND DATE(timestamp) = (SELECT DATE(MAX(timestamp)) FROM ohlcv_ticks WHERE symbol = 'MNQ' AND timeframe = '1H' AND volume > 100)
