@@ -255,7 +255,7 @@ export const THRESHOLDS = {
   // Signal limits
   signals: {
     recentCount: 5,
-    fetchLimit: 100,
+    fetchLimit: 500,  // Match CHART_CONFIG.signalsLimit for consistent detection
   },
 } as const
 
