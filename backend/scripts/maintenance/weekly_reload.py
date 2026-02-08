@@ -405,7 +405,7 @@ def download_and_load_mbp(api_key: str, start: str, end: str):
             api_key,
             start,
             end,
-            hours_per_chunk=4  # 4-hour chunks for memory efficiency
+            hours_per_chunk=2  # 2-hour chunks to avoid OOM on high-volume days
         )
         return True
     except Exception as e:
@@ -432,7 +432,7 @@ def download_and_load_trades(api_key: str, start: str, end: str):
             api_key,
             start,
             end,
-            hours_per_chunk=4  # 4-hour chunks for memory efficiency
+            hours_per_chunk=2  # 2-hour chunks to avoid OOM on high-volume days
         )
         return True
     except Exception as e:
