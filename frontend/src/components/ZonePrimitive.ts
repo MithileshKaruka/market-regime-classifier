@@ -168,9 +168,9 @@ export class ZonePrimitive implements ISeriesPrimitive<Time> {
     const adjustedTime = this.adjustToLocal(this._zone.formed_at)
     const x1 = timeScale.timeToCoordinate(adjustedTime as Time)
 
-    // Debug: log if zone coordinate is null
+    // Zone timestamp is outside the visible chart range - silently return null
+    // This is expected for older zones when chart is zoomed in to recent data
     if (x1 === null) {
-      console.log(`[Zone] ${this._zone.zone_type} ${this._zone.price_low.toFixed(0)}-${this._zone.price_high.toFixed(0)} x1=null (timestamp=${this._zone.formed_at}, adjusted=${adjustedTime})`)
       return null
     }
 

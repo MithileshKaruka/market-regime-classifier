@@ -123,85 +123,117 @@ async def get_orderflow_signals(
     4. **Delta Unwind**: Cumulative delta reached extreme and is now reversing
     5. **Exhaustion**: High volume with minimal price movement
     """
-    with DuckDBStorage() as storage:
-        # Query pre-aggregated OHLCV data from ohlcv_ticks table
-        # This table is pre-computed from mbp_ticks with accurate DOM/delta data
-        # Get most recent N bars, then order chronologically for signal detection
-        # Filter out spurious low-volume bars
-        df = storage.conn.execute(f"""
-            SELECT * FROM (
-                SELECT
-                    timestamp,
-                    open,
-                    high,
-                    low,
-                    close,
-                    volume,
-                    instant_delta,
-                    dom_imbalance,
-                    total_bid_depth,
-                    total_ask_depth
-                FROM ohlcv_ticks
-                WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
-                  AND volume > 100
-                ORDER BY timestamp DESC
-                LIMIT {limit}
-            ) ORDER BY timestamp ASC
-        """).pl()
+    import logging
+    logger = logging.getLogger(__name__)
 
-        if len(df) == 0:
+    try:
+        with DuckDBStorage() as storage:
+            # Query pre-aggregated OHLCV data from ohlcv_ticks table
+            # This table is pre-computed from mbp_ticks with accurate DOM/delta data
+            # Get most recent N bars, then order chronologically for signal detection
+            # Filter out spurious low-volume bars
+            df = storage.conn.execute(f"""
+                SELECT * FROM (
+                    SELECT
+                        timestamp,
+                        open,
+                        high,
+                        low,
+                        close,
+                        volume,
+                        instant_delta,
+                        dom_imbalance,
+                        total_bid_depth,
+                        total_ask_depth
+                    FROM ohlcv_ticks
+                    WHERE symbol = 'MNQ' AND timeframe = '{timeframe}'
+                      AND volume > 100
+                    ORDER BY timestamp DESC
+                    LIMIT {limit}
+                ) ORDER BY timestamp ASC
+            """).pl()
+
+            if len(df) == 0:
+                return OrderflowSignalsResponse(
+                    timeframe=timeframe,
+                    signals=[],
+                    total_count=0,
+                )
+
+            # Check if orderflow data is available (not all NULL)
+            # If instant_delta is all NULL, orderflow signals won't work properly
+            has_orderflow = df.select(pl.col("instant_delta").is_not_null().any()).item()
+            if not has_orderflow:
+                logger.warning(f"No orderflow data for {timeframe} - returning empty signals")
+                return OrderflowSignalsResponse(
+                    timeframe=timeframe,
+                    signals=[],
+                    total_count=0,
+                )
+
+            # Fill NULL orderflow values with 0 to prevent calculation errors
+            df = df.with_columns([
+                pl.col("instant_delta").fill_null(0).alias("instant_delta"),
+                pl.col("dom_imbalance").fill_null(0.5).alias("dom_imbalance"),
+                pl.col("total_bid_depth").fill_null(0).alias("total_bid_depth"),
+                pl.col("total_ask_depth").fill_null(0).alias("total_ask_depth"),
+            ])
+
+            # Initialize detector with config values
+            config = get_config()
+            detector = OrderflowSignalDetector(
+                timeframe=timeframe,
+                absorption_volume_mult=config.orderflow_alpha.absorption_volume_mult,
+                absorption_price_tol=config.orderflow_alpha.absorption_price_tol,
+                absorption_dom_threshold=config.orderflow_alpha.absorption_dom_threshold,
+                lsf_sweep_threshold_pct=config.orderflow_alpha.lsf_sweep_threshold_pct,
+                lsf_snapback_pct=config.orderflow_alpha.lsf_snapback_pct,
+                lsf_snapback_bars=config.orderflow_alpha.lsf_snapback_bars,
+                obi_threshold=config.orderflow_alpha.obi_threshold,
+                delta_zscore_threshold=config.orderflow_alpha.delta_zscore_threshold,
+                delta_unwind_pct=config.orderflow_alpha.delta_unwind_pct,
+                delta_unwind_bars=config.orderflow_alpha.delta_unwind_bars,
+                exhaustion_volume_mult=config.orderflow_alpha.exhaustion_volume_mult,
+                exhaustion_range_ratio_max=config.orderflow_alpha.exhaustion_range_ratio_max,
+                lookback_bars=config.orderflow_alpha.absorption_lookback,
+            )
+
+            # Detect signals
+            signals = detector.detect_all_signals(
+                df,
+                detect_absorption=detect_absorption,
+                detect_lsf=detect_lsf,
+                detect_obi=detect_obi,
+                detect_delta_unwind=detect_delta_unwind,
+                detect_exhaustion=detect_exhaustion,
+            )
+
+            # Convert to response format
+            signal_responses = [
+                OrderflowSignalResponse(
+                    timestamp=sig.timestamp,
+                    signal_type=sig.signal_type.value,
+                    direction=sig.direction.value,
+                    price=sig.price,
+                    strength=sig.strength,
+                    details=sig.details,
+                )
+                for sig in signals
+            ]
+
             return OrderflowSignalsResponse(
                 timeframe=timeframe,
-                signals=[],
-                total_count=0,
+                signals=signal_responses,
+                total_count=len(signal_responses),
             )
 
-        # Initialize detector with config values
-        config = get_config()
-        detector = OrderflowSignalDetector(
-            timeframe=timeframe,
-            absorption_volume_mult=config.orderflow_alpha.absorption_volume_mult,
-            absorption_price_tol=config.orderflow_alpha.absorption_price_tol,
-            absorption_dom_threshold=config.orderflow_alpha.absorption_dom_threshold,
-            lsf_sweep_threshold_pct=config.orderflow_alpha.lsf_sweep_threshold_pct,
-            lsf_snapback_pct=config.orderflow_alpha.lsf_snapback_pct,
-            lsf_snapback_bars=config.orderflow_alpha.lsf_snapback_bars,
-            obi_threshold=config.orderflow_alpha.obi_threshold,
-            delta_zscore_threshold=config.orderflow_alpha.delta_zscore_threshold,
-            delta_unwind_pct=config.orderflow_alpha.delta_unwind_pct,
-            delta_unwind_bars=config.orderflow_alpha.delta_unwind_bars,
-            exhaustion_volume_mult=config.orderflow_alpha.exhaustion_volume_mult,
-            exhaustion_range_ratio_max=config.orderflow_alpha.exhaustion_range_ratio_max,
-            lookback_bars=config.orderflow_alpha.absorption_lookback,
-        )
-
-        # Detect signals
-        signals = detector.detect_all_signals(
-            df,
-            detect_absorption=detect_absorption,
-            detect_lsf=detect_lsf,
-            detect_obi=detect_obi,
-            detect_delta_unwind=detect_delta_unwind,
-            detect_exhaustion=detect_exhaustion,
-        )
-
-        # Convert to response format
-        signal_responses = [
-            OrderflowSignalResponse(
-                timestamp=sig.timestamp,
-                signal_type=sig.signal_type.value,
-                direction=sig.direction.value,
-                price=sig.price,
-                strength=sig.strength,
-                details=sig.details,
-            )
-            for sig in signals
-        ]
-
+    except Exception as e:
+        # Log the error but return empty signals instead of 500 error
+        logger.error(f"Error detecting orderflow signals for {timeframe}: {e}", exc_info=True)
         return OrderflowSignalsResponse(
             timeframe=timeframe,
-            signals=signal_responses,
-            total_count=len(signal_responses),
+            signals=[],
+            total_count=0,
         )
 
 
