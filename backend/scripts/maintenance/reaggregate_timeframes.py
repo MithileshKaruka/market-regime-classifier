@@ -133,14 +133,63 @@ def reaggregate_timeframe(source_tf: str, target_tf: str, dry_run: bool = False)
         print(f"  Change: {existing:,} -> {new_count:,} ({new_count - existing:+,})")
 
 
+def check_bar_alignment():
+    """Check current bar alignment for all timeframes"""
+    print("\n" + "=" * 60)
+    print("  Checking Bar Alignment")
+    print("=" * 60)
+
+    with DuckDBStorage() as storage:
+        for tf in ['5M', '15M', '1H', '4H', '1D']:
+            result = storage.conn.execute(f"""
+                SELECT EXTRACT(HOUR FROM timestamp) as hour, COUNT(*) as cnt
+                FROM ohlcv_ticks
+                WHERE symbol = 'MNQ' AND timeframe = '{tf}'
+                GROUP BY hour
+                ORDER BY hour
+            """).fetchdf()
+
+            print(f"\n{tf} bars by hour:")
+
+            # Define expected hours for each timeframe
+            if tf in ('5M', '15M', '1H'):
+                expected = set(range(24))  # All hours valid
+            elif tf == '4H':
+                expected = {0, 4, 8, 12, 16, 20}
+            elif tf == '1D':
+                expected = {0}
+
+            actual = set(int(h) for h in result['hour'].tolist()) if len(result) > 0 else set()
+            misaligned = actual - expected
+
+            for _, row in result.iterrows():
+                hour = int(row['hour'])
+                cnt = int(row['cnt'])
+                status = "OK" if hour in expected else "MISALIGNED"
+                print(f"  Hour {hour:2d}: {cnt:,} bars  [{status}]")
+
+            if misaligned:
+                print(f"  -> ISSUE: Found bars at unexpected hours: {sorted(misaligned)}")
+            else:
+                print(f"  -> OK: All bars at expected hours")
+
+    return len(misaligned) == 0
+
+
 def main():
     parser = argparse.ArgumentParser(description='Re-aggregate higher timeframes from 5M data')
     parser.add_argument('--timeframe', '-t', choices=['15M', '1H', '4H', '1D', 'all'],
                         default='all', help='Timeframe to re-aggregate')
     parser.add_argument('--dry-run', '-n', action='store_true',
                         help='Show what would be done without making changes')
+    parser.add_argument('--check', '-c', action='store_true',
+                        help='Check bar alignment without making changes')
 
     args = parser.parse_args()
+
+    if args.check:
+        check_bar_alignment()
+        return
 
     print("=" * 60)
     print("Re-aggregating Higher Timeframes from 5M Data")
@@ -153,6 +202,9 @@ def main():
 
     for tf in timeframes:
         reaggregate_timeframe('5M', tf, dry_run=args.dry_run)
+
+    print("\n  Verifying alignment...")
+    check_bar_alignment()
 
     print("\nDone!")
 

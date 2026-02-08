@@ -121,46 +121,38 @@ def filter_ohlcv_data(df: pl.DataFrame) -> pl.DataFrame:
 def resample_to_timeframe(df: pl.DataFrame, timeframe: str) -> pl.DataFrame:
     """Resample 1-minute OHLCV to higher timeframe
 
-    For 4H and 1D timeframes, uses CME session boundaries (18:00 ET / 23:00 UTC)
-    instead of UTC midnight to properly align trading days.
+    Uses standard UTC boundaries for all timeframes:
+    - 5M: 0, 5, 10, ... minutes
+    - 15M: 0, 15, 30, 45 minutes
+    - 1H: 0, 1, 2, ... hours
+    - 4H: 0, 4, 8, 12, 16, 20 hours
+    - 1D: 0 (midnight UTC)
+
+    Note: Previous version attempted CME session alignment with hour shifts,
+    but this caused misaligned bar timestamps. Standard UTC boundaries are
+    cleaner and work correctly with charting libraries.
     """
-    timeframe_map = {"5M": "5m", "15M": "15m", "1H": "1h", "4H": "4h", "1D": "1d"}
-    duration = timeframe_map[timeframe]
+    # Map timeframe to minutes for truncation
+    tf_minutes = {
+        "5M": 5,
+        "15M": 15,
+        "1H": 60,
+        "4H": 240,
+        "1D": 1440,
+    }
 
-    # For 4H and 1D, use CME session boundaries (18:00 ET = 23:00 UTC)
-    # Shift timestamps by 1 hour so that 23:00 UTC becomes 00:00, then bucket, then shift back
-    # This aligns daily bars to CME trading sessions instead of UTC midnight
-    if timeframe in ("4H", "1D"):
-        # CME session starts at 23:00 UTC (18:00 ET)
-        # Shift forward by 1 hour: 23:00 UTC -> 00:00 (next day)
-        df_shifted = df.with_columns([
-            (pl.col("ts_event") + pl.duration(hours=1)).alias("ts_shifted")
-        ])
+    minutes = tf_minutes[timeframe]
 
-        df_resampled = df_shifted.group_by_dynamic(
-            "ts_shifted", every=duration, closed="left", label="left"
-        ).agg([
-            pl.col("open").first(),
-            pl.col("high").max(),
-            pl.col("low").min(),
-            pl.col("close").last(),
-            pl.col("volume").sum(),
-        ])
-
-        # Shift timestamps back to original timezone
-        df_resampled = df_resampled.with_columns([
-            (pl.col("ts_shifted") - pl.duration(hours=1)).alias("ts_event")
-        ]).drop("ts_shifted")
-    else:
-        df_resampled = df.group_by_dynamic(
-            "ts_event", every=duration, closed="left", label="left"
-        ).agg([
-            pl.col("open").first(),
-            pl.col("high").max(),
-            pl.col("low").min(),
-            pl.col("close").last(),
-            pl.col("volume").sum(),
-        ])
+    # Use truncate for clean UTC boundaries (same approach as reaggregate script)
+    df_resampled = df.with_columns([
+        pl.col("ts_event").dt.truncate(f"{minutes}m").alias("bar_time")
+    ]).group_by("bar_time").agg([
+        pl.col("open").first(),
+        pl.col("high").max(),
+        pl.col("low").min(),
+        pl.col("close").last(),
+        pl.col("volume").sum(),
+    ]).rename({"bar_time": "ts_event"}).sort("ts_event")
 
     df_resampled = df_resampled.drop_nulls()
 
