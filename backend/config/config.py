@@ -154,19 +154,17 @@ class OrderflowAlphaConfig:
     ldr_wall_threshold: float = 2.5
     # CVD (Cumulative Volume Delta)
     cvd_threshold: float = 5000  # Contracts threshold for scoring
-    # Absorption detection (conservative middle-ground for untested timeframes)
+    # Absorption detection (trade flow based - only works on 5M/15M)
+    # Direction = OPPOSITE of aggressive flow (absorber wins)
     absorption_volume_mult: float = 1.5
-    absorption_price_tol: float = 0.0015  # 0.15% price tolerance
-    absorption_dom_threshold: float = 0.52  # DOM > 0.52 bullish, < 0.48 bearish
-    absorption_lookback: int = 15
-    # Timeframe-specific absorption parameters (1M, 5M, 15M: backtested | 1H+: projected)
+    absorption_price_tol: float = 0.002  # 0.2% price tolerance
+    absorption_dom_threshold: float = 0.52  # DOM threshold (legacy fallback)
+    absorption_lookback: int = 20
+    # Timeframe-specific absorption parameters (backtested with trade flow)
+    # Note: Absorption only works on 5M/15M - trade_flow_ratio smooths to ~0.50 on higher TFs
     absorption_by_tf: Dict[str, Dict[str, float]] = field(default_factory=lambda: {
-        '1M': {'volume_mult': 1.8, 'price_tol': 0.002, 'dom_threshold': 0.51, 'lookback': 10},
-        '5M': {'volume_mult': 1.8, 'price_tol': 0.0005, 'dom_threshold': 0.51, 'lookback': 50},
-        '15M': {'volume_mult': 1.3, 'price_tol': 0.002, 'dom_threshold': 0.51, 'lookback': 10},
-        '1H': {'volume_mult': 1.8, 'price_tol': 0.005, 'dom_threshold': 0.51, 'lookback': 24},
-        '4H': {'volume_mult': 1.8, 'price_tol': 0.005, 'dom_threshold': 0.51, 'lookback': 30},
-        '1D': {'volume_mult': 1.8, 'price_tol': 0.005, 'dom_threshold': 0.51, 'lookback': 20},
+        '5M': {'volume_mult': 2.0, 'price_tol': 0.001, 'delta_z': 2.0, 'tf_threshold': 0.55, 'lookback': 10},
+        '15M': {'volume_mult': 1.2, 'price_tol': 0.002, 'delta_z': 1.5, 'tf_threshold': 0.60, 'lookback': 20},
     })
     # Timeframe-specific OBI thresholds
     # Adjusted for DOM-derived imbalance (dom / (1-dom))
@@ -187,11 +185,27 @@ class OrderflowAlphaConfig:
     delta_unwind_pct: float = 0.15  # Min % of delta that must unwind (15%)
     delta_unwind_bars: int = 8  # Bars to confirm unwind
     delta_lookback_bars: int = 100  # Lookback for z-score calculation
-    # Exhaustion detection (backtested: 63.6% hit rate, 1.51 PF)
-    exhaustion_volume_mult: float = 1.3  # Volume spike multiplier
-    exhaustion_range_ratio_max: float = 0.3  # Max range ratio for exhaustion
-    exhaustion_trend_lookback: int = 5  # Bars to determine trend
+    # Exhaustion detection (AND logic: delta + trend must agree)
+    # Backtested by TF: 5M 70.6%/PF6.42, 15M 58.8%/PF2.72, 1H 60.4%/PF2.31
+    # Code has timeframe-specific defaults; these are fallback values
+    exhaustion_volume_mult: float = 1.8  # Volume spike multiplier
+    exhaustion_range_ratio_max: float = 0.60  # Max range ratio for exhaustion
+    exhaustion_trend_lookback: int = 5  # Bars to determine trend direction
     exhaustion_lookback_bars: int = 20  # Lookback for rolling averages
+    # Institutional Activity detection (from trades data)
+    # Backtested 15M: 80% hit rate, 8.99 PF with volume confirmation
+    inst_large_trade_min: int = 2  # Min large trades per bar
+    inst_flow_threshold: float = 0.55  # Trade flow threshold
+    inst_volume_mult: float = 1.2  # Volume spike confirmation
+    # Trade Flow Divergence detection (from trades data)
+    # Backtested 15M: 100% hit rate with persistence + volume + flow smoothing
+    tfd_flow_threshold: float = 0.58  # Trade flow threshold for divergence
+    tfd_price_change_pct: float = 0.001  # Min price change (0.10%)
+    tfd_lookback_bars: int = 5  # Bars for price change lookback
+    tfd_persistence_bars: int = 2  # Require consecutive bars
+    tfd_volume_mult: float = 1.3  # Volume spike confirmation
+    tfd_flow_avg_bars: int = 2  # Rolling average for flow smoothing
+    volume_lookback: int = 20  # General volume avg lookback
 
 
 @dataclass

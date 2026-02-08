@@ -19,8 +19,8 @@ from dataclasses import dataclass
 from typing import List, Optional
 from datetime import datetime
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add backend directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import polars as pl
 from app.data.storage import DuckDBStorage
@@ -112,19 +112,11 @@ class OBIBacktester:
         end_date: Optional[str] = None,
         limit: int = 100000,
     ) -> pl.DataFrame:
-        """Load historical data by aggregating MBP ticks into bars"""
-        tf_map = {
-            "1M": "1 minute",
-            "5M": "5 minutes",
-            "15M": "15 minutes",
-            "30M": "30 minutes",
-            "1H": "1 hour",
-            "4H": "4 hours",
-            "1D": "1 day",
-        }
-        interval = tf_map.get(timeframe, "1 minute")
+        """Load historical data from ohlcv_ticks table"""
+        where_clauses = [f"symbol = '{symbol}'", f"timeframe = '{timeframe}'"]
+        # Require dom_imbalance for OBI signals
+        where_clauses.append("dom_imbalance IS NOT NULL")
 
-        where_clauses = [f"symbol = '{symbol}'"]
         if start_date:
             where_clauses.append(f"timestamp >= '{start_date}'")
         if end_date:
@@ -132,39 +124,26 @@ class OBIBacktester:
 
         where_str = " AND ".join(where_clauses)
 
-        # Aggregate MBP ticks into bars with depth metrics
         query = f"""
-            WITH bars AS (
-                SELECT
-                    time_bucket(INTERVAL '{interval}', timestamp) as bar_time,
-                    FIRST(mid_price) as open,
-                    MAX(mid_price) as high,
-                    MIN(mid_price) as low,
-                    LAST(mid_price) as close,
-                    COUNT(*) as volume,
-                    AVG(dom_imbalance) as dom_imbalance,
-                    AVG(total_bid_depth) as total_bid_depth,
-                    AVG(total_ask_depth) as total_ask_depth,
-                    -- Also get last values for point-in-time analysis
-                    LAST(total_bid_depth) as last_bid_depth,
-                    LAST(total_ask_depth) as last_ask_depth,
-                    LAST(dom_imbalance) as last_dom
-                FROM mbp_ticks
-                WHERE {where_str}
-                GROUP BY bar_time
-                ORDER BY bar_time ASC
-            )
-            SELECT * FROM bars
-            WHERE open IS NOT NULL
+            SELECT
+                timestamp,
+                open,
+                high,
+                low,
+                close,
+                volume,
+                dom_imbalance,
+                instant_delta,
+                cvd
+            FROM ohlcv_ticks
+            WHERE {where_str}
+            ORDER BY timestamp ASC
             LIMIT {limit}
         """
 
         df = self.db.conn.execute(query).pl()
 
-        if "bar_time" in df.columns:
-            df = df.rename({"bar_time": "timestamp"})
-
-        logger.info(f"Loaded {len(df)} bars from MBP ticks for {symbol} {timeframe}")
+        logger.info(f"Loaded {len(df)} bars with orderflow for {symbol} {timeframe}")
         return df
 
     def detect_signals(self, df: pl.DataFrame) -> List[OBISignal]:

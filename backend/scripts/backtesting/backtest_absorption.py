@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 # Add backend to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import argparse
 import logging
@@ -83,17 +83,26 @@ class AbsorptionBacktester:
         depth_ratio_min: float = 0.7,
         depth_ratio_max: float = 1.5,
         require_cvd_confirm: bool = False,
+        # New trade flow parameters
+        use_trade_flow: bool = True,
+        delta_z_threshold: float = 1.0,
+        trade_flow_threshold: float = 0.6,
+        min_large_trades: int = 0,
     ):
         """Initialize backtester with detection parameters
 
         Args:
             volume_mult: Volume must exceed avg * this multiplier
             price_tol: Max price change % to be considered "stable"
-            dom_threshold: DOM imbalance threshold for direction
+            dom_threshold: DOM imbalance threshold for direction (legacy)
             lookback_bars: Bars for rolling averages
             depth_ratio_min: Min depth ratio for stability
             depth_ratio_max: Max depth ratio for stability
             require_cvd_confirm: Require CVD to confirm DOM direction
+            use_trade_flow: Use trade flow for direction instead of DOM
+            delta_z_threshold: Z-score threshold for instant_delta
+            trade_flow_threshold: Trade flow ratio threshold (>0.5 = more buys)
+            min_large_trades: Minimum large trades for confirmation
         """
         self.volume_mult = volume_mult
         self.price_tol = price_tol
@@ -102,6 +111,11 @@ class AbsorptionBacktester:
         self.depth_ratio_min = depth_ratio_min
         self.depth_ratio_max = depth_ratio_max
         self.require_cvd_confirm = require_cvd_confirm
+        # Trade flow params
+        self.use_trade_flow = use_trade_flow
+        self.delta_z_threshold = delta_z_threshold
+        self.trade_flow_threshold = trade_flow_threshold
+        self.min_large_trades = min_large_trades
 
         self.db = DuckDBStorage()
 
@@ -115,6 +129,10 @@ class AbsorptionBacktester:
             "depth_ratio_min": self.depth_ratio_min,
             "depth_ratio_max": self.depth_ratio_max,
             "require_cvd_confirm": self.require_cvd_confirm,
+            "use_trade_flow": self.use_trade_flow,
+            "delta_z_threshold": self.delta_z_threshold,
+            "trade_flow_threshold": self.trade_flow_threshold,
+            "min_large_trades": self.min_large_trades,
         }
 
     def load_data(
@@ -125,10 +143,9 @@ class AbsorptionBacktester:
         end_date: Optional[str] = None,
         limit: int = 100000,
     ) -> pl.DataFrame:
-        """Load historical data by aggregating MBP ticks into bars
+        """Load historical data from ohlcv_ticks table
 
-        Uses MBP tick data which has actual DOM imbalance values,
-        and aggregates into OHLCV bars at the specified timeframe.
+        Uses pre-aggregated OHLCV data with orderflow metrics.
 
         Args:
             timeframe: Bar timeframe (1M, 5M, 15M, 1H, etc.)
@@ -140,19 +157,10 @@ class AbsorptionBacktester:
         Returns:
             DataFrame with OHLCV and orderflow metrics
         """
-        # Parse timeframe to interval
-        tf_map = {
-            "1M": "1 minute",
-            "5M": "5 minutes",
-            "15M": "15 minutes",
-            "30M": "30 minutes",
-            "1H": "1 hour",
-            "4H": "4 hours",
-            "1D": "1 day",
-        }
-        interval = tf_map.get(timeframe, "1 minute")
+        where_clauses = [f"symbol = '{symbol}'", f"timeframe = '{timeframe}'"]
+        # Only get bars with orderflow data
+        where_clauses.append("dom_imbalance IS NOT NULL")
 
-        where_clauses = [f"symbol = '{symbol}'"]
         if start_date:
             where_clauses.append(f"timestamp >= '{start_date}'")
         if end_date:
@@ -160,37 +168,30 @@ class AbsorptionBacktester:
 
         where_str = " AND ".join(where_clauses)
 
-        # Aggregate MBP ticks into bars with proper OHLCV and DOM metrics
         query = f"""
-            WITH bars AS (
-                SELECT
-                    time_bucket(INTERVAL '{interval}', timestamp) as bar_time,
-                    FIRST(mid_price) as open,
-                    MAX(mid_price) as high,
-                    MIN(mid_price) as low,
-                    LAST(mid_price) as close,
-                    COUNT(*) as volume,
-                    AVG(dom_imbalance) as dom_imbalance,
-                    SUM(delta) as cvd,
-                    AVG(total_bid_depth) as total_bid_depth,
-                    AVG(total_ask_depth) as total_ask_depth
-                FROM mbp_ticks
-                WHERE {where_str}
-                GROUP BY bar_time
-                ORDER BY bar_time ASC
-            )
-            SELECT * FROM bars
-            WHERE open IS NOT NULL
+            SELECT
+                timestamp,
+                open,
+                high,
+                low,
+                close,
+                volume,
+                dom_imbalance,
+                cvd,
+                instant_delta,
+                trade_flow_ratio,
+                buy_trades,
+                sell_trades,
+                large_trade_count
+            FROM ohlcv_ticks
+            WHERE {where_str}
+            ORDER BY timestamp ASC
             LIMIT {limit}
         """
 
         df = self.db.conn.execute(query).pl()
 
-        # Rename bar_time to timestamp for consistency
-        if "bar_time" in df.columns:
-            df = df.rename({"bar_time": "timestamp"})
-
-        logger.info(f"Loaded {len(df)} bars from MBP ticks for {symbol} {timeframe}")
+        logger.info(f"Loaded {len(df)} bars with orderflow for {symbol} {timeframe}")
         return df
 
     def detect_signals(self, df: pl.DataFrame) -> List[AbsorptionSignal]:
@@ -198,11 +199,13 @@ class AbsorptionBacktester:
 
         Uses the current parameter settings to identify absorption patterns.
 
-        Absorption Logic:
+        Absorption Logic (with trade flow):
         1. Volume exceeds average by multiplier (high activity)
         2. Price change is minimal (absorption holding price)
-        3. DOM shows directional bias (who is absorbing)
-        4. (Optional) Depth stability - resting orders not depleting
+        3. Strong directional trade flow (someone is aggressively trading)
+        4. Direction: OPPOSITE of aggressive flow (absorber wins)
+           - Strong buying (delta > 0) + flat price = asks absorbing = BEARISH
+           - Strong selling (delta < 0) + flat price = bids absorbing = BULLISH
 
         Args:
             df: DataFrame with OHLCV and orderflow data
@@ -221,16 +224,15 @@ class AbsorptionBacktester:
             pl.col("volume").rolling_mean(window_size=self.lookback_bars).alias("avg_volume"),
         ])
 
-        # Add depth ratio calculations if we have depth data
-        has_depth = "total_bid_depth" in df.columns and "total_ask_depth" in df.columns
-        if has_depth:
+        # Calculate delta z-score for trade flow mode
+        if self.use_trade_flow:
             df = df.with_columns([
-                pl.col("total_bid_depth").rolling_mean(window_size=self.lookback_bars).alias("avg_bid_depth"),
-                pl.col("total_ask_depth").rolling_mean(window_size=self.lookback_bars).alias("avg_ask_depth"),
+                pl.col("instant_delta").rolling_mean(window_size=self.lookback_bars).alias("avg_delta"),
+                pl.col("instant_delta").rolling_std(window_size=self.lookback_bars).alias("std_delta"),
             ])
             df = df.with_columns([
-                (pl.col("total_bid_depth") / pl.col("avg_bid_depth")).alias("bid_depth_ratio"),
-                (pl.col("total_ask_depth") / pl.col("avg_ask_depth")).alias("ask_depth_ratio"),
+                ((pl.col("instant_delta") - pl.col("avg_delta")) /
+                 (pl.col("std_delta") + 1)).alias("delta_z")
             ])
 
         # Calculate price change percentage
@@ -251,54 +253,72 @@ class AbsorptionBacktester:
             # Condition 2: Price stability (absorption holding level)
             price_stable = row["price_change_pct"] < self.price_tol
 
-            # Condition 3: DOM directional bias
-            dom = row["dom_imbalance"]
-            if dom is None:
+            if not (volume_high and price_stable):
                 continue
 
-            # Condition 4 (optional): Depth stability
-            depth_stable = True
-            if has_depth:
-                bid_ratio = row.get("bid_depth_ratio")
-                ask_ratio = row.get("ask_depth_ratio")
-                if bid_ratio is not None and ask_ratio is not None:
-                    bid_stable = self.depth_ratio_min < bid_ratio < self.depth_ratio_max
-                    ask_stable = self.depth_ratio_min < ask_ratio < self.depth_ratio_max
-                    depth_stable = bid_stable or ask_stable
+            # Condition 3 & 4: Direction determination
+            direction = None
+            dom = row.get("dom_imbalance", 0.5) or 0.5
 
-            # All conditions must pass
-            if volume_high and price_stable and depth_stable:
-                # Determine direction from DOM
+            if self.use_trade_flow:
+                # Trade flow mode: use instant_delta and trade_flow_ratio
+                delta_z = row.get("delta_z")
+                trade_flow = row.get("trade_flow_ratio")
+                instant_delta = row.get("instant_delta", 0) or 0
+                large_trades = row.get("large_trade_count", 0) or 0
+
+                if delta_z is None:
+                    continue
+
+                # Check large trade requirement
+                if large_trades < self.min_large_trades:
+                    continue
+
+                # Strong BUYING pressure (delta_z > threshold) + flat price
+                # = Asks are absorbing all the buying = BEARISH (sellers in control)
+                if delta_z > self.delta_z_threshold:
+                    # Confirm with trade_flow_ratio if available
+                    if trade_flow is not None and trade_flow < self.trade_flow_threshold:
+                        continue  # Trade flow doesn't confirm buying pressure
+                    direction = "BEARISH"
+
+                # Strong SELLING pressure (delta_z < -threshold) + flat price
+                # = Bids are absorbing all the selling = BULLISH (buyers in control)
+                elif delta_z < -self.delta_z_threshold:
+                    # Confirm with trade_flow_ratio if available
+                    if trade_flow is not None and trade_flow > (1 - self.trade_flow_threshold):
+                        continue  # Trade flow doesn't confirm selling pressure
+                    direction = "BULLISH"
+
+            else:
+                # Legacy DOM mode
+                if dom is None:
+                    continue
                 if dom > self.dom_threshold:
                     direction = "BULLISH"
                 elif dom < (1 - self.dom_threshold):
                     direction = "BEARISH"
-                else:
-                    continue  # Neutral DOM, skip
 
-                # Optional: CVD confirmation
-                # If enabled, CVD should align with DOM direction
-                if self.require_cvd_confirm:
-                    cvd = row.get("cvd", 0)
-                    if cvd is None:
-                        cvd = 0
-                    if direction == "BULLISH" and cvd <= 0:
-                        continue  # CVD doesn't confirm bullish
-                    if direction == "BEARISH" and cvd >= 0:
-                        continue  # CVD doesn't confirm bearish
+            if direction is None:
+                continue
 
-                # Calculate strength based on volume excess
-                strength = min(1.0, (row["volume"] / row["avg_volume"] - 1) / 2)
+            # Calculate strength based on volume excess and delta intensity
+            vol_strength = min(1.0, (row["volume"] / row["avg_volume"] - 1) / 2)
+            if self.use_trade_flow and row.get("delta_z") is not None:
+                delta_strength = min(1.0, abs(row["delta_z"]) / 3)
+                strength = (vol_strength + delta_strength) / 2
+            else:
+                strength = vol_strength
 
-                signals.append(AbsorptionSignal(
-                    timestamp=row["timestamp"],
-                    direction=direction,
-                    price=row["close"],
-                    volume=row["volume"],
-                    avg_volume=row["avg_volume"],
-                    dom_imbalance=dom,
-                    strength=strength,
-                ))
+            signals.append(AbsorptionSignal(
+                timestamp=row["timestamp"],
+                direction=direction,
+                price=row["close"],
+                volume=row["volume"],
+                avg_volume=row["avg_volume"],
+                dom_imbalance=dom,
+                strength=strength,
+            ))
 
         logger.info(f"Detected {len(signals)} absorption signals")
         return signals
@@ -476,19 +496,22 @@ class AbsorptionBacktester:
         timeframe: str = "1M",
         symbol: str = "MNQ",
         limit: int = 50000,
+        use_trade_flow: bool = True,
     ) -> List[BacktestSummary]:
         """Run parameter sweep to find optimal settings
 
         Tests combinations of parameters and returns results sorted by hit rate.
 
+        Args:
+            timeframe: Bar timeframe
+            symbol: Trading symbol
+            limit: Max bars to load
+            use_trade_flow: If True, sweep trade flow params; if False, sweep DOM params
+
         Returns:
             List of BacktestSummary sorted by hit_rate_5 descending
         """
-        # Parameter ranges to test
-        volume_mults = [1.2, 1.3, 1.5, 1.8, 2.0]
-        price_tols = [0.0005, 0.001, 0.002, 0.003]
-        dom_thresholds = [0.51, 0.52, 0.55, 0.58]
-        lookbacks = [10, 20, 30, 50]
+        self.use_trade_flow = use_trade_flow
 
         # Load data once
         df = self.load_data(timeframe, symbol, limit=limit)
@@ -497,31 +520,69 @@ class AbsorptionBacktester:
             return []
 
         results = []
-        total_combos = len(volume_mults) * len(price_tols) * len(dom_thresholds) * len(lookbacks)
-        logger.info(f"Testing {total_combos} parameter combinations...")
 
-        for i, (vm, pt, dt, lb) in enumerate(product(volume_mults, price_tols, dom_thresholds, lookbacks)):
-            self.volume_mult = vm
-            self.price_tol = pt
-            self.dom_threshold = dt
-            self.lookback_bars = lb
+        if use_trade_flow:
+            # Trade flow parameter sweep
+            volume_mults = [1.2, 1.5, 1.8, 2.0, 2.5]
+            price_tols = [0.001, 0.002, 0.003, 0.005]
+            delta_z_thresholds = [0.5, 1.0, 1.5, 2.0]
+            lookbacks = [10, 20, 30]
+            trade_flow_thresholds = [0.55, 0.6, 0.65]
 
-            signals = self.detect_signals(df.clone())
-            if not signals:
-                continue
+            total_combos = len(volume_mults) * len(price_tols) * len(delta_z_thresholds) * len(lookbacks) * len(trade_flow_thresholds)
+            logger.info(f"Testing {total_combos} trade flow parameter combinations...")
 
-            backtest_results = self.calculate_forward_returns(df, signals)
-            summary = self.calculate_summary(backtest_results)
+            for i, (vm, pt, dz, lb, tf) in enumerate(product(volume_mults, price_tols, delta_z_thresholds, lookbacks, trade_flow_thresholds)):
+                self.volume_mult = vm
+                self.price_tol = pt
+                self.delta_z_threshold = dz
+                self.lookback_bars = lb
+                self.trade_flow_threshold = tf
 
-            # Only include if we have enough signals
-            if summary.total_signals >= 20:
-                results.append(summary)
+                signals = self.detect_signals(df.clone())
+                if not signals:
+                    continue
 
-            if (i + 1) % 50 == 0:
-                logger.info(f"Progress: {i + 1}/{total_combos}")
+                backtest_results = self.calculate_forward_returns(df, signals)
+                summary = self.calculate_summary(backtest_results)
 
-        # Sort by hit rate at 5-bar horizon
-        results.sort(key=lambda x: x.hit_rate_5, reverse=True)
+                # Only include if we have enough signals
+                if summary.total_signals >= 10:
+                    results.append(summary)
+
+                if (i + 1) % 100 == 0:
+                    logger.info(f"Progress: {i + 1}/{total_combos}")
+        else:
+            # Legacy DOM parameter sweep
+            volume_mults = [1.2, 1.3, 1.5, 1.8, 2.0]
+            price_tols = [0.0005, 0.001, 0.002, 0.003]
+            dom_thresholds = [0.51, 0.52, 0.55, 0.58]
+            lookbacks = [10, 20, 30, 50]
+
+            total_combos = len(volume_mults) * len(price_tols) * len(dom_thresholds) * len(lookbacks)
+            logger.info(f"Testing {total_combos} DOM parameter combinations...")
+
+            for i, (vm, pt, dt, lb) in enumerate(product(volume_mults, price_tols, dom_thresholds, lookbacks)):
+                self.volume_mult = vm
+                self.price_tol = pt
+                self.dom_threshold = dt
+                self.lookback_bars = lb
+
+                signals = self.detect_signals(df.clone())
+                if not signals:
+                    continue
+
+                backtest_results = self.calculate_forward_returns(df, signals)
+                summary = self.calculate_summary(backtest_results)
+
+                if summary.total_signals >= 20:
+                    results.append(summary)
+
+                if (i + 1) % 50 == 0:
+                    logger.info(f"Progress: {i + 1}/{total_combos}")
+
+        # Sort by profit factor (more useful than hit rate alone)
+        results.sort(key=lambda x: (x.profit_factor, x.hit_rate_5), reverse=True)
 
         return results
 
@@ -631,7 +692,7 @@ def print_summary(summary: BacktestSummary):
 
 def main():
     parser = argparse.ArgumentParser(description="Backtest absorption signal detection")
-    parser.add_argument("--timeframe", "-t", default="1M", help="Bar timeframe (1M, 5M, 15M, etc.)")
+    parser.add_argument("--timeframe", "-t", default="15M", help="Bar timeframe (5M, 15M, 1H, etc.)")
     parser.add_argument("--symbol", "-s", default="MNQ", help="Trading symbol")
     parser.add_argument("--limit", "-l", type=int, default=50000, help="Max bars to load")
     parser.add_argument("--sweep", action="store_true", help="Run parameter sweep")
@@ -639,38 +700,57 @@ def main():
     parser.add_argument("--export-csv", type=str, help="Export signals to CSV file")
 
     # Detection parameters (for single run)
-    parser.add_argument("--volume-mult", type=float, default=1.3, help="Volume multiplier threshold")
-    parser.add_argument("--price-tol", type=float, default=0.001, help="Price tolerance (0.001 = 0.1%)")
-    parser.add_argument("--dom-threshold", type=float, default=0.52, help="DOM imbalance threshold")
+    parser.add_argument("--volume-mult", type=float, default=1.5, help="Volume multiplier threshold")
+    parser.add_argument("--price-tol", type=float, default=0.002, help="Price tolerance (0.002 = 0.2%)")
+    parser.add_argument("--dom-threshold", type=float, default=0.52, help="DOM imbalance threshold (legacy)")
     parser.add_argument("--lookback", type=int, default=20, help="Lookback period for averages")
     parser.add_argument("--cvd-confirm", action="store_true", help="Require CVD to confirm signal direction")
+
+    # Trade flow parameters (new)
+    parser.add_argument("--no-trade-flow", action="store_true", help="Use legacy DOM mode instead of trade flow")
+    parser.add_argument("--delta-z", type=float, default=1.0, help="Delta z-score threshold")
+    parser.add_argument("--trade-flow-threshold", type=float, default=0.6, help="Trade flow ratio threshold")
+    parser.add_argument("--min-large-trades", type=int, default=0, help="Minimum large trades required")
 
     args = parser.parse_args()
 
     if args.sweep:
         # Parameter sweep mode
-        print("\nRunning parameter sweep...")
-        backtester = AbsorptionBacktester()
+        use_trade_flow = not args.no_trade_flow
+        mode = "trade flow" if use_trade_flow else "DOM (legacy)"
+        print(f"\nRunning parameter sweep ({mode} mode)...")
+
+        backtester = AbsorptionBacktester(use_trade_flow=use_trade_flow)
         results = backtester.run_parameter_sweep(
             timeframe=args.timeframe,
             symbol=args.symbol,
             limit=args.limit,
+            use_trade_flow=use_trade_flow,
         )
 
         if not results:
             print("No valid parameter combinations found")
             return
 
-        print(f"\nTop 10 parameter combinations (sorted by 5-bar hit rate):")
-        print("-" * 100)
-        print(f"{'Vol Mult':>10} {'Price Tol':>10} {'DOM Thr':>10} {'Lookback':>10} {'Signals':>10} {'Hit 5bar':>10} {'PF':>10}")
-        print("-" * 100)
+        print(f"\nTop 10 parameter combinations (sorted by profit factor):")
+        print("-" * 120)
 
-        for summary in results[:10]:
-            p = summary.parameters
-            print(f"{p['volume_mult']:>10.2f} {p['price_tol']:>10.4f} {p['dom_threshold']:>10.2f} "
-                  f"{p['lookback_bars']:>10} {summary.total_signals:>10} {summary.hit_rate_5:>10.1%} "
-                  f"{summary.profit_factor:>10.2f}")
+        if use_trade_flow:
+            print(f"{'Vol Mult':>10} {'Price Tol':>10} {'Delta Z':>10} {'TF Thr':>10} {'Lookback':>8} {'Signals':>8} {'Hit 5bar':>10} {'PF':>8}")
+            print("-" * 120)
+            for summary in results[:10]:
+                p = summary.parameters
+                print(f"{p['volume_mult']:>10.2f} {p['price_tol']:>10.4f} {p['delta_z_threshold']:>10.2f} "
+                      f"{p['trade_flow_threshold']:>10.2f} {p['lookback_bars']:>8} {summary.total_signals:>8} "
+                      f"{summary.hit_rate_5:>10.1%} {summary.profit_factor:>8.2f}")
+        else:
+            print(f"{'Vol Mult':>10} {'Price Tol':>10} {'DOM Thr':>10} {'Lookback':>10} {'Signals':>10} {'Hit 5bar':>10} {'PF':>10}")
+            print("-" * 120)
+            for summary in results[:10]:
+                p = summary.parameters
+                print(f"{p['volume_mult']:>10.2f} {p['price_tol']:>10.4f} {p['dom_threshold']:>10.2f} "
+                      f"{p['lookback_bars']:>10} {summary.total_signals:>10} {summary.hit_rate_5:>10.1%} "
+                      f"{summary.profit_factor:>10.2f}")
 
         # Print detailed summary of best result
         print("\n\nBest Parameters:")
@@ -678,12 +758,18 @@ def main():
 
     else:
         # Single run mode
+        use_trade_flow = not args.no_trade_flow
+
         backtester = AbsorptionBacktester(
             volume_mult=args.volume_mult,
             price_tol=args.price_tol,
             dom_threshold=args.dom_threshold,
             lookback_bars=args.lookback,
             require_cvd_confirm=args.cvd_confirm,
+            use_trade_flow=use_trade_flow,
+            delta_z_threshold=args.delta_z,
+            trade_flow_threshold=args.trade_flow_threshold,
+            min_large_trades=args.min_large_trades,
         )
 
         # Load data and detect signals

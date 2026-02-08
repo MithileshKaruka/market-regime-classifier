@@ -563,22 +563,33 @@ async def get_agent_bias(
             lookback_bars=config.orderflow_alpha.absorption_lookback,
         )
 
-        # Only look at recent signals (last 20 bars)
-        recent_df = df.tail(20)
-        recent_df = recent_df.with_columns([
-            (pl.col("volume") * pl.col("dom_imbalance")).alias("total_bid_depth"),
-            (pl.col("volume") * (1 - pl.col("dom_imbalance"))).alias("total_ask_depth"),
-        ])
+        # Detect signals on full df (rolling calculations need history), then filter to recent
+        # This matches the improved backtest approach that showed better signal accuracy
+        all_absorption = detector.detect_absorption(df)
+        all_delta_unwind = detector.detect_delta_unwind(df)
+        all_exhaustion = detector.detect_exhaustion(df)
 
-        # Detect primary signals (Absorption, Delta Unwind, Exhaustion)
-        absorption_signals = detector.detect_absorption(recent_df)
-        delta_unwind_signals = detector.detect_delta_unwind(recent_df)
-        exhaustion_signals = detector.detect_exhaustion(recent_df)
+        # Filter to only signals from recent N bars
+        signal_window_bars = 20
+        recent_cutoff_ts = df.tail(signal_window_bars)["timestamp"].min()
 
-        # Convert signals to dicts
-        abs_dicts = [{"direction": s.direction.value, "strength": s.strength} for s in absorption_signals]
-        du_dicts = [{"direction": s.direction.value, "strength": s.strength} for s in delta_unwind_signals]
-        exh_dicts = [{"direction": s.direction.value, "strength": s.strength} for s in exhaustion_signals]
+        def filter_recent(signals):
+            """Keep only signals from recent window"""
+            recent = []
+            for s in signals:
+                sig_ts = s.timestamp
+                cutoff = recent_cutoff_ts
+                if hasattr(sig_ts, "timestamp"):
+                    sig_ts = sig_ts.timestamp()
+                if hasattr(cutoff, "timestamp"):
+                    cutoff = cutoff.timestamp()
+                if sig_ts >= cutoff:
+                    recent.append({"direction": s.direction.value, "strength": s.strength})
+            return recent
+
+        abs_dicts = filter_recent(all_absorption)
+        du_dicts = filter_recent(all_delta_unwind)
+        exh_dicts = filter_recent(all_exhaustion)
 
         # Get S/R levels
         sr_levels = None

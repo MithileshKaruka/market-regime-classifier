@@ -125,43 +125,31 @@ orderflow_alpha:
   # - Moderate: |CVD| > threshold = 60-90 score contribution
   # - Weak: |CVD| < threshold = 40-60 score contribution
 
-  # Absorption detection
-  # Default values (conservative middle-ground for untested timeframes)
-  absorption_volume_mult: 1.5  # Volume multiplier vs average
-  absorption_price_tol: 0.0015  # 0.15% price tolerance for stable price
-  absorption_dom_threshold: 0.52  # DOM > 0.52 bullish, < 0.48 bearish
-  absorption_lookback: 15
+  # Absorption detection (trade flow based)
+  # Direction = OPPOSITE of aggressive flow (absorber wins)
+  # Note: Only works on 5M/15M - trade_flow_ratio smooths to ~0.50 on higher TFs
+  absorption_volume_mult: 1.5  # Volume multiplier vs average (default)
+  absorption_price_tol: 0.002  # 0.2% price tolerance for stable price
+  absorption_dom_threshold: 0.52  # DOM threshold (legacy fallback)
+  absorption_lookback: 20
 
-  # Timeframe-specific absorption parameters
-  # 1M, 5M, 15M: from backtesting | 1H+: projected (needs more data)
+  # Timeframe-specific absorption parameters (backtested with trade flow)
+  # delta_z = z-score of instant_delta
+  # tf_threshold = trade_flow_ratio confirmation threshold
   absorption_by_tf:
-    1M:
-      volume_mult: 1.8
-      price_tol: 0.002
-      dom_threshold: 0.51
+    5M:  # Backtested: 71% hit rate, PF 3.54
+      volume_mult: 2.0
+      price_tol: 0.001
+      delta_z: 2.0
+      tf_threshold: 0.55
       lookback: 10
-    5M:
-      volume_mult: 1.8
-      price_tol: 0.0005
-      dom_threshold: 0.51
-      lookback: 50
-    15M:  # Backtested: 66.7% hit rate, 3.56 PF
-      volume_mult: 1.3
+    15M:  # Backtested: 83% hit rate, PF 11.0
+      volume_mult: 1.2
       price_tol: 0.002
-      dom_threshold: 0.51
-      lookback: 10
-    1H:  # Projected - DOM averages to 0.5 at this TF, needs different approach
-      volume_mult: 1.8
-      price_tol: 0.005
-      dom_threshold: 0.51
-      lookback: 24
-    4H:  # Projected
-      volume_mult: 1.8
-      price_tol: 0.005
-      dom_threshold: 0.51
-      lookback: 30
-    1D:  # Projected
-      volume_mult: 1.8
+      delta_z: 1.5
+      tf_threshold: 0.60
+      lookback: 20
+    # 1H+ disabled - trade_flow_ratio smooths to ~0.50, no edge
       price_tol: 0.005
       dom_threshold: 0.51
       lookback: 20
@@ -196,28 +184,34 @@ orderflow_alpha:
   delta_unwind_bars: 8            # Bars to confirm unwind
   delta_lookback_bars: 100        # Lookback for z-score calculation
 
-  # Exhaustion detection
+  # Exhaustion detection (AND logic: delta + trend must agree)
   # High volume with minimal price movement indicates exhaustion
-  # Backtested: 63.6% hit rate, 1.51 PF at volume_mult=1.3, range_max=0.3
-  exhaustion_volume_mult: 1.3     # Volume must exceed avg by this mult
-  exhaustion_range_ratio_max: 0.3 # Price range must be < expected * this ratio
+  # Backtested by TF: 5M 70.6%/PF6.42, 15M 58.8%/PF2.72, 1H 60.4%/PF2.31
+  # Code has timeframe-specific defaults; these are fallback values
+  exhaustion_volume_mult: 1.8     # Volume must exceed avg by this mult
+  exhaustion_range_ratio_max: 0.60 # Price range must be < expected * this ratio
   exhaustion_trend_lookback: 5    # Bars to determine trend direction
   exhaustion_lookback_bars: 20    # Lookback for rolling averages
 
   # Institutional Activity detection (from trades data)
   # Detects large trades (>=50 contracts) with directional flow
   # Indicates institutional accumulation/distribution
-  # Backtested 5M: 71.4% hit rate, 2.71 PF at large_min=1, flow=0.55
-  inst_large_trade_min: 1         # Min large trades per bar to trigger signal
+  # Backtested 15M: 80% hit rate, 8.99 PF with volume confirmation
+  inst_large_trade_min: 2         # Min large trades per bar to trigger signal
   inst_flow_threshold: 0.55       # Trade flow ratio threshold (>0.55 bullish, <0.45 bearish)
+  inst_volume_mult: 1.2           # Volume spike confirmation (volume > avg * 1.2)
 
   # Trade Flow Divergence detection (from trades data)
   # Detects when trade flow diverges from price direction (contrarian signal)
-  # Example: price falling but >55% buys = bullish divergence (hidden accumulation)
-  # Backtested 5M: 70.0% hit rate, 5.64 PF at flow=0.55, price=0.15%, lookback=3
-  tfd_flow_threshold: 0.55        # Trade flow ratio threshold for divergence
-  tfd_price_change_pct: 0.0015    # Min price change (0.15%) to consider directional
-  tfd_lookback_bars: 3            # Bars to measure price change over
+  # Example: price falling but >58% buys = bullish divergence (hidden accumulation)
+  # Backtested 15M: 100% hit rate with persistence + volume + flow smoothing
+  tfd_flow_threshold: 0.58        # Trade flow ratio threshold for divergence
+  tfd_price_change_pct: 0.001     # Min price change (0.10%) to consider directional
+  tfd_lookback_bars: 5            # Bars to measure price change over
+  tfd_persistence_bars: 2         # Require 2 consecutive bars with divergence
+  tfd_volume_mult: 1.3            # Volume spike confirmation (volume > avg * 1.3)
+  tfd_flow_avg_bars: 2            # Rolling average bars for flow smoothing
+  volume_lookback: 20             # Lookback bars for volume average calculation
 
 # =============================================================================
 # RISK MANAGEMENT

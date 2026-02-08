@@ -26,6 +26,7 @@ export const API_CONFIG = {
     advancedMetrics: '/api/orderflow/advanced',
     agentDecision: '/api/orderflow/agent',
     agentBias: '/api/orderflow/agent-bias',
+    zones: '/api/v1/zones',
   },
 } as const
 
@@ -133,6 +134,14 @@ export const COLORS = {
     exhaustion: '#ec4899',       // Pink - exhaustion signal
     institutional: '#06b6d4',    // Cyan - institutional activity (from trades)
     tradeFlowDiv: '#8b5cf6',     // Violet - trade flow divergence (from trades)
+  },
+
+  // Zone colors (Supply/Demand)
+  zones: {
+    demand: '#22c55e',           // Green - demand zone (bullish)
+    demandBg: 'rgba(34, 197, 94, 0.25)',  // Green with 25% opacity
+    supply: '#ef4444',           // Red - supply zone (bearish)
+    supplyBg: 'rgba(239, 68, 68, 0.25)',  // Red with 25% opacity
   },
 
   // Agent mode colors
@@ -265,7 +274,7 @@ export const THRESHOLDS = {
 export const TIMEFRAMES = ['5M', '15M', '1H', '4H', '1D'] as const
 export type Timeframe = typeof TIMEFRAMES[number]
 
-export const DEFAULT_TIMEFRAME: Timeframe = '1H'
+export const DEFAULT_TIMEFRAME: Timeframe = '15M'
 
 // ============================================================================
 // Indicator Definitions

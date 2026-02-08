@@ -93,44 +93,77 @@ class TradesSignalBacktester:
         # Institutional Activity params
         inst_large_trade_min: int = 3,       # Min large trades per bar
         inst_flow_threshold: float = 0.65,   # Flow ratio threshold (>0.65 bullish)
+        inst_persistence_bars: int = 1,      # Require N consecutive bars with activity
+        inst_volume_mult: float = 0.0,       # Require volume > avg * mult (0=disabled)
         # Trade Flow Divergence params
         tfd_flow_threshold: float = 0.60,    # Flow ratio threshold for divergence
         tfd_price_change_pct: float = 0.002, # Min price change (0.2%)
         tfd_lookback_bars: int = 5,          # Bars to measure price change
+        tfd_persistence_bars: int = 1,       # Require N consecutive bars with divergence
+        tfd_volume_mult: float = 0.0,        # Require volume > avg * mult (0=disabled)
+        tfd_flow_avg_bars: int = 1,          # Rolling avg bars for flow (1=no avg)
+        # General
+        volume_lookback: int = 20,           # Lookback for volume average
     ):
         """Initialize backtester with detection parameters
 
         Args:
             inst_large_trade_min: Minimum large trades per bar for Institutional signal
             inst_flow_threshold: Trade flow ratio threshold (>threshold=bullish, <1-threshold=bearish)
+            inst_persistence_bars: Require N consecutive bars with institutional activity
+            inst_volume_mult: Require volume spike (0=disabled)
             tfd_flow_threshold: Flow threshold for divergence detection
             tfd_price_change_pct: Minimum price change to consider directional
             tfd_lookback_bars: Bars to look back for price change calculation
+            tfd_persistence_bars: Require N consecutive bars with flow divergence
+            tfd_volume_mult: Require volume spike (0=disabled)
+            tfd_flow_avg_bars: Rolling average bars for flow ratio smoothing
+            volume_lookback: Lookback bars for volume average calculation
         """
         # Institutional params
         self.inst_large_trade_min = inst_large_trade_min
         self.inst_flow_threshold = inst_flow_threshold
+        self.inst_persistence_bars = inst_persistence_bars
+        self.inst_volume_mult = inst_volume_mult
 
         # TFD params
         self.tfd_flow_threshold = tfd_flow_threshold
         self.tfd_price_change_pct = tfd_price_change_pct
         self.tfd_lookback_bars = tfd_lookback_bars
+        self.tfd_persistence_bars = tfd_persistence_bars
+        self.tfd_volume_mult = tfd_volume_mult
+        self.tfd_flow_avg_bars = tfd_flow_avg_bars
+
+        # General
+        self.volume_lookback = volume_lookback
 
         self.db = DuckDBStorage()
 
     def get_parameters(self, signal_type: TradesSignalType) -> dict:
         """Return current parameters as dict for given signal type"""
         if signal_type == TradesSignalType.INSTITUTIONAL:
-            return {
+            params = {
                 "inst_large_trade_min": self.inst_large_trade_min,
                 "inst_flow_threshold": self.inst_flow_threshold,
             }
+            if self.inst_persistence_bars > 1:
+                params["inst_persistence_bars"] = self.inst_persistence_bars
+            if self.inst_volume_mult > 0:
+                params["inst_volume_mult"] = self.inst_volume_mult
+            return params
         else:  # TFD
-            return {
+            params = {
                 "tfd_flow_threshold": self.tfd_flow_threshold,
                 "tfd_price_change_pct": self.tfd_price_change_pct,
                 "tfd_lookback_bars": self.tfd_lookback_bars,
             }
+            if self.tfd_persistence_bars > 1:
+                params["tfd_persistence_bars"] = self.tfd_persistence_bars
+            if self.tfd_volume_mult > 0:
+                params["tfd_volume_mult"] = self.tfd_volume_mult
+            if self.tfd_flow_avg_bars > 1:
+                params["tfd_flow_avg_bars"] = self.tfd_flow_avg_bars
+            return params
 
     def load_data(
         self,
@@ -194,34 +227,70 @@ class TradesSignalBacktester:
         Signal Logic:
         - Large trade count >= threshold (default 3)
         - Trade flow ratio strongly directional (>0.65 bullish, <0.35 bearish)
+        - Optional: Require N consecutive bars with activity (persistence filter)
+        - Optional: Require volume spike confirmation
         """
         signals = []
 
-        for row in df.iter_rows(named=True):
+        # Add volume average if using volume confirmation
+        if self.inst_volume_mult > 0:
+            df = df.with_columns([
+                pl.col("volume").rolling_mean(window_size=self.volume_lookback).alias("avg_volume"),
+            ])
+
+        rows = df.to_dicts()
+        persistence_count = 0
+        persistence_direction = None
+
+        for i, row in enumerate(rows):
             large_count = row.get("large_trade_count")
             flow_ratio = row.get("trade_flow_ratio")
 
             # Skip if no trade data
             if large_count is None or flow_ratio is None:
+                persistence_count = 0
+                persistence_direction = None
                 continue
 
             # Check for significant institutional activity
             if large_count < self.inst_large_trade_min:
+                persistence_count = 0
+                persistence_direction = None
                 continue
 
             # Determine direction from trade flow
+            direction = None
             if flow_ratio > self.inst_flow_threshold:
-                # Strong buy flow with institutional trades = bullish accumulation
                 direction = "BULLISH"
-                strength = min(1.0, (flow_ratio - 0.5) * 2 * (large_count / self.inst_large_trade_min) / 2)
-
             elif flow_ratio < (1 - self.inst_flow_threshold):
-                # Strong sell flow with institutional trades = bearish distribution
                 direction = "BEARISH"
-                strength = min(1.0, (0.5 - flow_ratio) * 2 * (large_count / self.inst_large_trade_min) / 2)
 
+            if direction is None:
+                persistence_count = 0
+                persistence_direction = None
+                continue
+
+            # Volume confirmation check
+            if self.inst_volume_mult > 0:
+                avg_vol = row.get("avg_volume")
+                vol = row.get("volume", 0) or 0
+                if avg_vol is None or avg_vol == 0 or vol < avg_vol * self.inst_volume_mult:
+                    persistence_count = 0
+                    persistence_direction = None
+                    continue
+
+            # Persistence filter - track consecutive bars
+            if direction == persistence_direction:
+                persistence_count += 1
             else:
-                continue  # Trade flow not directional enough
+                persistence_count = 1
+                persistence_direction = direction
+
+            # Only signal if persistence requirement met
+            if persistence_count < self.inst_persistence_bars:
+                continue
+
+            strength = min(1.0, (abs(flow_ratio - 0.5) * 2) * (large_count / self.inst_large_trade_min) / 2)
 
             signals.append(TradesSignal(
                 timestamp=row["timestamp"],
@@ -233,6 +302,9 @@ class TradesSignalBacktester:
                 price_change_pct=None,
                 strength=strength,
             ))
+
+            # Reset persistence to avoid duplicate signals
+            persistence_count = 0
 
         logger.info(f"Detected {len(signals)} Institutional signals")
         return signals
@@ -247,6 +319,9 @@ class TradesSignalBacktester:
         Signal Logic:
         - Price falling but trade_flow_ratio > threshold = Bullish divergence
         - Price rising but trade_flow_ratio < 1-threshold = Bearish divergence
+        - Optional: Require N consecutive bars with divergence (persistence filter)
+        - Optional: Require volume spike confirmation
+        - Optional: Use rolling average of flow ratio (smoothing)
         """
         signals = []
 
@@ -259,41 +334,88 @@ class TradesSignalBacktester:
              pl.col("close").shift(self.tfd_lookback_bars)).alias("price_change_pct"),
         ])
 
-        for row in df.iter_rows(named=True):
-            flow_ratio = row.get("trade_flow_ratio")
+        # Add rolling average of flow ratio if using smoothing
+        if self.tfd_flow_avg_bars > 1:
+            df = df.with_columns([
+                pl.col("trade_flow_ratio").rolling_mean(window_size=self.tfd_flow_avg_bars).alias("avg_flow_ratio"),
+            ])
+
+        # Add volume average if using volume confirmation
+        if self.tfd_volume_mult > 0:
+            df = df.with_columns([
+                pl.col("volume").rolling_mean(window_size=self.volume_lookback).alias("avg_volume"),
+            ])
+
+        rows = df.to_dicts()
+        persistence_count = 0
+        persistence_direction = None
+
+        for i, row in enumerate(rows):
+            # Use smoothed flow ratio if available
+            if self.tfd_flow_avg_bars > 1:
+                flow_ratio = row.get("avg_flow_ratio")
+            else:
+                flow_ratio = row.get("trade_flow_ratio")
             price_change = row.get("price_change_pct")
 
             # Skip if no data
             if flow_ratio is None or price_change is None:
+                persistence_count = 0
+                persistence_direction = None
                 continue
 
+            # Volume confirmation check
+            if self.tfd_volume_mult > 0:
+                avg_vol = row.get("avg_volume")
+                vol = row.get("volume", 0) or 0
+                if avg_vol is None or avg_vol == 0 or vol < avg_vol * self.tfd_volume_mult:
+                    persistence_count = 0
+                    persistence_direction = None
+                    continue
+
+            # Detect divergence direction
+            direction = None
             # Bullish divergence: price falling but buyers dominating
             if price_change < -self.tfd_price_change_pct and flow_ratio > self.tfd_flow_threshold:
-                strength = min(1.0, (flow_ratio - 0.5) * 2 * abs(price_change) / self.tfd_price_change_pct / 2)
-                signals.append(TradesSignal(
-                    timestamp=row["timestamp"],
-                    signal_type=TradesSignalType.TRADE_FLOW_DIV,
-                    direction="BULLISH",
-                    price=row["close"],
-                    trade_flow_ratio=flow_ratio,
-                    large_trade_count=row.get("large_trade_count", 0) or 0,
-                    price_change_pct=price_change,
-                    strength=strength,
-                ))
-
+                direction = "BULLISH"
             # Bearish divergence: price rising but sellers dominating
             elif price_change > self.tfd_price_change_pct and flow_ratio < (1 - self.tfd_flow_threshold):
-                strength = min(1.0, (0.5 - flow_ratio) * 2 * abs(price_change) / self.tfd_price_change_pct / 2)
-                signals.append(TradesSignal(
-                    timestamp=row["timestamp"],
-                    signal_type=TradesSignalType.TRADE_FLOW_DIV,
-                    direction="BEARISH",
-                    price=row["close"],
-                    trade_flow_ratio=flow_ratio,
-                    large_trade_count=row.get("large_trade_count", 0) or 0,
-                    price_change_pct=price_change,
-                    strength=strength,
-                ))
+                direction = "BEARISH"
+
+            if direction is None:
+                persistence_count = 0
+                persistence_direction = None
+                continue
+
+            # Persistence filter - track consecutive bars
+            if direction == persistence_direction:
+                persistence_count += 1
+            else:
+                persistence_count = 1
+                persistence_direction = direction
+
+            # Only signal if persistence requirement met
+            if persistence_count < self.tfd_persistence_bars:
+                continue
+
+            strength = min(1.0, abs(flow_ratio - 0.5) * 2 * abs(price_change) / self.tfd_price_change_pct / 2)
+
+            # Use raw flow ratio for signal data
+            raw_flow = row.get("trade_flow_ratio", flow_ratio)
+
+            signals.append(TradesSignal(
+                timestamp=row["timestamp"],
+                signal_type=TradesSignalType.TRADE_FLOW_DIV,
+                direction=direction,
+                price=row["close"],
+                trade_flow_ratio=raw_flow,
+                large_trade_count=row.get("large_trade_count", 0) or 0,
+                price_change_pct=price_change,
+                strength=strength,
+            ))
+
+            # Reset persistence to avoid duplicate signals
+            persistence_count = 0
 
         logger.info(f"Detected {len(signals)} Trade Flow Divergence signals")
         return signals
@@ -421,8 +543,13 @@ class TradesSignalBacktester:
         timeframe: str = "5M",
         symbol: str = "MNQ",
         limit: int = 50000,
+        test_improvements: bool = False,
     ) -> List[BacktestSummary]:
-        """Run parameter sweep for Institutional signal"""
+        """Run parameter sweep for Institutional signal
+
+        Args:
+            test_improvements: If True, also test persistence and volume params
+        """
         df = self.load_data(timeframe=timeframe, symbol=symbol, limit=limit)
 
         if len(df) == 0:
@@ -433,32 +560,44 @@ class TradesSignalBacktester:
         large_trade_mins = [1, 2, 3, 4, 5]
         flow_thresholds = [0.55, 0.60, 0.65, 0.70, 0.75]
 
+        # Additional params for improvements
+        if test_improvements:
+            persistence_bars_list = [1, 2]
+            volume_mults = [0.0, 1.2, 1.5]
+        else:
+            persistence_bars_list = [1]
+            volume_mults = [0.0]
+
         results = []
-        total_combos = len(large_trade_mins) * len(flow_thresholds)
+        total_combos = len(large_trade_mins) * len(flow_thresholds) * len(persistence_bars_list) * len(volume_mults)
 
         logger.info(f"Testing {total_combos} Institutional parameter combinations...")
 
         combo_count = 0
         for ltm in large_trade_mins:
             for ft in flow_thresholds:
-                combo_count += 1
-                self.inst_large_trade_min = ltm
-                self.inst_flow_threshold = ft
+                for pb in persistence_bars_list:
+                    for vm in volume_mults:
+                        combo_count += 1
+                        self.inst_large_trade_min = ltm
+                        self.inst_flow_threshold = ft
+                        self.inst_persistence_bars = pb
+                        self.inst_volume_mult = vm
 
-                signals = self.detect_institutional(df.clone())
-                if len(signals) < 10:
-                    continue
+                        signals = self.detect_institutional(df.clone())
+                        if len(signals) < 5:  # Lower threshold when testing improvements
+                            continue
 
-                bt_results = self.calculate_forward_returns(df, signals)
-                if len(bt_results) < 10:
-                    continue
+                        bt_results = self.calculate_forward_returns(df, signals)
+                        if len(bt_results) < 5:
+                            continue
 
-                summary = self.calculate_summary(bt_results, TradesSignalType.INSTITUTIONAL)
-                if summary.hit_rate_5 > 50:
-                    results.append(summary)
+                        summary = self.calculate_summary(bt_results, TradesSignalType.INSTITUTIONAL)
+                        if summary.hit_rate_5 > 50:
+                            results.append(summary)
 
-                if combo_count % 10 == 0:
-                    logger.info(f"Progress: {combo_count}/{total_combos}")
+                        if combo_count % 20 == 0:
+                            logger.info(f"Progress: {combo_count}/{total_combos}")
 
         results.sort(key=lambda x: (x.hit_rate_5, x.profit_factor), reverse=True)
         return results
@@ -468,8 +607,13 @@ class TradesSignalBacktester:
         timeframe: str = "5M",
         symbol: str = "MNQ",
         limit: int = 50000,
+        test_improvements: bool = False,
     ) -> List[BacktestSummary]:
-        """Run parameter sweep for Trade Flow Divergence signal"""
+        """Run parameter sweep for Trade Flow Divergence signal
+
+        Args:
+            test_improvements: If True, also test persistence, volume, and flow avg params
+        """
         df = self.load_data(timeframe=timeframe, symbol=symbol, limit=limit)
 
         if len(df) == 0:
@@ -481,8 +625,19 @@ class TradesSignalBacktester:
         price_changes = [0.001, 0.0015, 0.002, 0.003, 0.004]
         lookbacks = [3, 5, 7, 10]
 
+        # Additional params for improvements
+        if test_improvements:
+            persistence_bars_list = [1, 2]
+            volume_mults = [0.0, 1.3]
+            flow_avg_bars_list = [1, 2]
+        else:
+            persistence_bars_list = [1]
+            volume_mults = [0.0]
+            flow_avg_bars_list = [1]
+
         results = []
-        total_combos = len(flow_thresholds) * len(price_changes) * len(lookbacks)
+        total_combos = (len(flow_thresholds) * len(price_changes) * len(lookbacks) *
+                        len(persistence_bars_list) * len(volume_mults) * len(flow_avg_bars_list))
 
         logger.info(f"Testing {total_combos} TFD parameter combinations...")
 
@@ -490,25 +645,31 @@ class TradesSignalBacktester:
         for ft in flow_thresholds:
             for pc in price_changes:
                 for lb in lookbacks:
-                    combo_count += 1
-                    self.tfd_flow_threshold = ft
-                    self.tfd_price_change_pct = pc
-                    self.tfd_lookback_bars = lb
+                    for pb in persistence_bars_list:
+                        for vm in volume_mults:
+                            for fab in flow_avg_bars_list:
+                                combo_count += 1
+                                self.tfd_flow_threshold = ft
+                                self.tfd_price_change_pct = pc
+                                self.tfd_lookback_bars = lb
+                                self.tfd_persistence_bars = pb
+                                self.tfd_volume_mult = vm
+                                self.tfd_flow_avg_bars = fab
 
-                    signals = self.detect_trade_flow_divergence(df.clone())
-                    if len(signals) < 10:
-                        continue
+                                signals = self.detect_trade_flow_divergence(df.clone())
+                                if len(signals) < 5:  # Lower threshold when testing improvements
+                                    continue
 
-                    bt_results = self.calculate_forward_returns(df, signals)
-                    if len(bt_results) < 10:
-                        continue
+                                bt_results = self.calculate_forward_returns(df, signals)
+                                if len(bt_results) < 5:
+                                    continue
 
-                    summary = self.calculate_summary(bt_results, TradesSignalType.TRADE_FLOW_DIV)
-                    if summary.hit_rate_5 > 50:
-                        results.append(summary)
+                                summary = self.calculate_summary(bt_results, TradesSignalType.TRADE_FLOW_DIV)
+                                if summary.hit_rate_5 > 50:
+                                    results.append(summary)
 
-                    if combo_count % 20 == 0:
-                        logger.info(f"Progress: {combo_count}/{total_combos}")
+                                if combo_count % 50 == 0:
+                                    logger.info(f"Progress: {combo_count}/{total_combos}")
 
         results.sort(key=lambda x: (x.hit_rate_5, x.profit_factor), reverse=True)
         return results
@@ -591,6 +752,8 @@ def main():
     parser.add_argument("--show-signals", action="store_true", help="Show individual signals")
     parser.add_argument("--signal-type", choices=["institutional", "tfd", "both"], default="both",
                         help="Which signal type to backtest")
+    parser.add_argument("--test-improvements", action="store_true",
+                        help="Test improvements: persistence filter, volume confirmation, flow smoothing")
 
     # Institutional params
     parser.add_argument("--inst-large-min", type=int, default=3, help="Min large trades")
@@ -615,12 +778,14 @@ def main():
         # Run parameter sweeps
         if args.signal_type in ["institutional", "both"]:
             print("\n" + "=" * 60)
-            print("INSTITUTIONAL SIGNAL PARAMETER SWEEP")
+            mode = " (with improvements)" if args.test_improvements else ""
+            print(f"INSTITUTIONAL SIGNAL PARAMETER SWEEP{mode}")
             print("=" * 60)
             results = backtester.run_parameter_sweep_institutional(
                 timeframe=args.timeframe,
                 symbol=args.symbol,
                 limit=args.limit,
+                test_improvements=args.test_improvements,
             )
 
             if not results:
@@ -639,12 +804,14 @@ def main():
 
         if args.signal_type in ["tfd", "both"]:
             print("\n" + "=" * 60)
-            print("TRADE FLOW DIVERGENCE PARAMETER SWEEP")
+            mode = " (with improvements)" if args.test_improvements else ""
+            print(f"TRADE FLOW DIVERGENCE PARAMETER SWEEP{mode}")
             print("=" * 60)
             results = backtester.run_parameter_sweep_tfd(
                 timeframe=args.timeframe,
                 symbol=args.symbol,
                 limit=args.limit,
+                test_improvements=args.test_improvements,
             )
 
             if not results:

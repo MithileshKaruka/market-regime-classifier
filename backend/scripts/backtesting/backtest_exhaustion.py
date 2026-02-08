@@ -25,8 +25,8 @@ from dataclasses import dataclass
 from typing import List, Optional
 from datetime import datetime
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add backend directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import polars as pl
 from app.data.storage import DuckDBStorage
@@ -87,6 +87,11 @@ class ExhaustionBacktester:
         range_ratio_max: float = 0.5,  # Price range must be < expected * this ratio
         trend_lookback: int = 5,  # Bars to determine prior trend
         lookback_bars: int = 20,  # Bars for rolling averages
+        # Trade flow parameters
+        use_trade_flow: bool = True,
+        delta_z_threshold: float = 1.0,  # Require delta z-score above this for direction
+        trade_flow_threshold: float = 0.55,  # Trade flow ratio threshold for confirmation
+        require_trend_confirm: bool = True,  # Require trend to match delta direction
     ):
         """Initialize backtester with detection parameters
 
@@ -95,11 +100,20 @@ class ExhaustionBacktester:
             range_ratio_max: Price range must be less than this ratio of expected range
             trend_lookback: Bars to look back for determining prior trend direction
             lookback_bars: Bars for calculating rolling volume/range averages
+            use_trade_flow: Use trade flow for direction confirmation
+            delta_z_threshold: Delta z-score threshold for direction
+            trade_flow_threshold: Trade flow ratio threshold for confirmation
+            require_trend_confirm: Require trend direction to match delta
         """
         self.volume_mult = volume_mult
         self.range_ratio_max = range_ratio_max
         self.trend_lookback = trend_lookback
         self.lookback_bars = lookback_bars
+        # Trade flow params
+        self.use_trade_flow = use_trade_flow
+        self.delta_z_threshold = delta_z_threshold
+        self.trade_flow_threshold = trade_flow_threshold
+        self.require_trend_confirm = require_trend_confirm
 
         self.db = DuckDBStorage()
 
@@ -110,6 +124,10 @@ class ExhaustionBacktester:
             "range_ratio_max": self.range_ratio_max,
             "trend_lookback": self.trend_lookback,
             "lookback_bars": self.lookback_bars,
+            "use_trade_flow": self.use_trade_flow,
+            "delta_z_threshold": self.delta_z_threshold,
+            "trade_flow_threshold": self.trade_flow_threshold,
+            "require_trend_confirm": self.require_trend_confirm,
         }
 
     def load_data(
@@ -120,19 +138,10 @@ class ExhaustionBacktester:
         end_date: Optional[str] = None,
         limit: int = 100000,
     ) -> pl.DataFrame:
-        """Load historical data by aggregating MBP ticks into bars"""
-        tf_map = {
-            "1M": "1 minute",
-            "5M": "5 minutes",
-            "15M": "15 minutes",
-            "30M": "30 minutes",
-            "1H": "1 hour",
-            "4H": "4 hours",
-            "1D": "1 day",
-        }
-        interval = tf_map.get(timeframe, "1 minute")
-
-        where_clauses = [f"symbol = '{symbol}'"]
+        """Load historical OHLCV data with orderflow metrics"""
+        where_clauses = [f"symbol = '{symbol}'", f"timeframe = '{timeframe}'"]
+        # Only load bars with orderflow data
+        where_clauses.append("instant_delta IS NOT NULL AND instant_delta != 0")
         if start_date:
             where_clauses.append(f"timestamp >= '{start_date}'")
         if end_date:
@@ -140,35 +149,23 @@ class ExhaustionBacktester:
 
         where_str = " AND ".join(where_clauses)
 
-        # Aggregate MBP ticks into bars
-        # Fix unsigned overflow: convert values > 2^31 to signed
         query = f"""
-            WITH bars AS (
-                SELECT
-                    time_bucket(INTERVAL '{interval}', timestamp) as bar_time,
-                    FIRST(mid_price) as open,
-                    MAX(mid_price) as high,
-                    MIN(mid_price) as low,
-                    LAST(mid_price) as close,
-                    COUNT(*) as volume,
-                    SUM(CASE WHEN delta > 2147483647 THEN CAST(delta AS BIGINT) - 4294967296 ELSE delta END) as bar_delta,
-                    AVG(dom_imbalance) as dom_imbalance
-                FROM mbp_ticks
-                WHERE {where_str}
-                GROUP BY bar_time
-                ORDER BY bar_time ASC
-            )
-            SELECT * FROM bars
-            WHERE open IS NOT NULL
+            SELECT
+                timestamp,
+                open, high, low, close, volume,
+                instant_delta,
+                dom_imbalance,
+                cvd,
+                trade_flow_ratio,
+                large_trade_count
+            FROM ohlcv_ticks
+            WHERE {where_str}
+            ORDER BY timestamp ASC
             LIMIT {limit}
         """
 
         df = self.db.conn.execute(query).pl()
-
-        if "bar_time" in df.columns:
-            df = df.rename({"bar_time": "timestamp"})
-
-        logger.info(f"Loaded {len(df)} bars from MBP ticks for {symbol} {timeframe}")
+        logger.info(f"Loaded {len(df)} bars with orderflow for {symbol} {timeframe}")
         return df
 
     def detect_signals(self, df: pl.DataFrame) -> List[ExhaustionSignal]:
@@ -177,10 +174,16 @@ class ExhaustionBacktester:
         Exhaustion Logic:
         1. High volume (spike above average)
         2. Small price range (price didn't move much despite volume)
-        3. Determine direction from delta and prior trend
+        3. Determine direction from delta z-score (with trade flow confirmation)
         4. Signal reversal of the exhausted move
+
+        Trade Flow Logic:
+        - Strong buying (delta_z > threshold) + small range = buying exhausted = BEARISH
+        - Strong selling (delta_z < -threshold) + small range = selling exhausted = BULLISH
+        - Optionally confirm with trend direction and trade_flow_ratio
         """
         signals = []
+        import math
 
         if len(df) < self.lookback_bars + self.trend_lookback + 2:
             logger.warning(f"Not enough data: {len(df)} bars")
@@ -195,9 +198,18 @@ class ExhaustionBacktester:
         df = df.with_columns([
             pl.col("volume").rolling_mean(window_size=self.lookback_bars).alias("avg_volume"),
             pl.col("bar_range").rolling_mean(window_size=self.lookback_bars).alias("avg_range"),
-            # Calculate expected range based on volume ratio
-            # (if volume is 2x average, we'd expect ~2x range)
         ])
+
+        # Calculate delta z-score for trade flow mode
+        if self.use_trade_flow:
+            df = df.with_columns([
+                pl.col("instant_delta").rolling_mean(window_size=self.lookback_bars).alias("avg_delta"),
+                pl.col("instant_delta").rolling_std(window_size=self.lookback_bars).alias("std_delta"),
+            ])
+            df = df.with_columns([
+                ((pl.col("instant_delta") - pl.col("avg_delta")) /
+                 (pl.col("std_delta") + 1)).alias("delta_z")
+            ])
 
         # Calculate price change over trend_lookback for trend direction
         df = df.with_columns([
@@ -221,7 +233,6 @@ class ExhaustionBacktester:
 
             # Calculate expected range based on volume
             # Simple model: if volume is Nx average, expect ~sqrt(N)x range (volatility scales with sqrt)
-            import math
             expected_range = row["avg_range"] * math.sqrt(volume_ratio)
             actual_range = row["bar_range"]
 
@@ -231,25 +242,68 @@ class ExhaustionBacktester:
             if range_ratio > self.range_ratio_max:
                 continue
 
-            # Determine direction based on delta and prior trend
-            delta = row["bar_delta"] if row["bar_delta"] is not None else 0
-            trend_change = row["trend_change"] if row["trend_change"] is not None else 0
-
-            # Delta direction
-            delta_direction = "POSITIVE" if delta > 0 else "NEGATIVE"
-
-            # Prior trend direction
+            # Get delta and trend info
+            instant_delta = row.get("instant_delta", 0) or 0
+            trend_change = row.get("trend_change", 0) or 0
+            delta_direction = "POSITIVE" if instant_delta > 0 else "NEGATIVE"
             prior_trend = "UP" if trend_change > 0 else "DOWN"
 
-            # Signal direction: fade the exhausted move
-            # If buying exhaustion (high volume, positive delta, but range small) -> BEARISH
-            # If selling exhaustion (high volume, negative delta, but range small) -> BULLISH
-            if delta > 0 or prior_trend == "UP":
-                direction = "BEARISH"  # Exhausted buying, expect reversal down
-            else:
-                direction = "BULLISH"  # Exhausted selling, expect reversal up
+            direction = None
 
-            strength = min(1.0, volume_ratio / (self.volume_mult * 2) * (1 - range_ratio))
+            if self.use_trade_flow:
+                # Trade flow mode: use delta_z for direction
+                delta_z = row.get("delta_z")
+                trade_flow = row.get("trade_flow_ratio")
+
+                if delta_z is None:
+                    continue
+
+                # Strong BUYING pressure (delta_z > threshold) + small range
+                # = Buying exhausted = BEARISH (expect reversal down)
+                if delta_z > self.delta_z_threshold:
+                    # Optionally require trend to confirm
+                    if self.require_trend_confirm and trend_change <= 0:
+                        continue  # Trend doesn't confirm buying pressure
+
+                    # Confirm with trade_flow_ratio if available
+                    if trade_flow is not None and trade_flow < self.trade_flow_threshold:
+                        continue  # Trade flow doesn't confirm buying pressure
+
+                    direction = "BEARISH"
+
+                # Strong SELLING pressure (delta_z < -threshold) + small range
+                # = Selling exhausted = BULLISH (expect reversal up)
+                elif delta_z < -self.delta_z_threshold:
+                    # Optionally require trend to confirm
+                    if self.require_trend_confirm and trend_change >= 0:
+                        continue  # Trend doesn't confirm selling pressure
+
+                    # Confirm with trade_flow_ratio if available
+                    if trade_flow is not None and trade_flow > (1 - self.trade_flow_threshold):
+                        continue  # Trade flow doesn't confirm selling pressure
+
+                    direction = "BULLISH"
+
+            else:
+                # Legacy mode: use simple delta/trend logic (but with AND instead of OR)
+                # If buying exhaustion (positive delta AND uptrend) -> BEARISH
+                # If selling exhaustion (negative delta AND downtrend) -> BULLISH
+                if instant_delta > 0 and trend_change > 0:
+                    direction = "BEARISH"
+                elif instant_delta < 0 and trend_change < 0:
+                    direction = "BULLISH"
+
+            if direction is None:
+                continue
+
+            # Calculate strength
+            vol_strength = min(1.0, (volume_ratio - 1) / 2)
+            range_strength = 1 - range_ratio  # Lower range = higher strength
+            if self.use_trade_flow and row.get("delta_z") is not None:
+                delta_strength = min(1.0, abs(row["delta_z"]) / 3)
+                strength = (vol_strength + range_strength + delta_strength) / 3
+            else:
+                strength = (vol_strength + range_strength) / 2
 
             signals.append(ExhaustionSignal(
                 timestamp=row["timestamp"],
@@ -366,52 +420,108 @@ class ExhaustionBacktester:
         timeframe: str = "1M",
         symbol: str = "MNQ",
         limit: int = 50000,
+        use_trade_flow: bool = True,
     ) -> List[BacktestSummary]:
-        """Run parameter sweep to find optimal settings"""
+        """Run parameter sweep to find optimal settings
+
+        Args:
+            timeframe: Bar timeframe
+            symbol: Trading symbol
+            limit: Max bars to load
+            use_trade_flow: If True, sweep trade flow params; if False, use legacy mode
+        """
+        self.use_trade_flow = use_trade_flow
         df = self.load_data(timeframe=timeframe, symbol=symbol, limit=limit)
 
         if len(df) == 0:
             logger.error("No data loaded")
             return []
 
-        # Parameter ranges to test
-        volume_mults = [1.3, 1.5, 1.8, 2.0, 2.5]
-        range_ratios = [0.3, 0.4, 0.5, 0.6, 0.7]
-        trend_lookbacks = [3, 5, 10]
-        lookbacks = [15, 20, 30]
-
         results = []
-        total_combos = len(volume_mults) * len(range_ratios) * len(trend_lookbacks) * len(lookbacks)
 
-        logger.info(f"Testing {total_combos} parameter combinations...")
+        if use_trade_flow:
+            # Trade flow parameter sweep
+            from itertools import product
 
-        combo_count = 0
-        for vol in volume_mults:
-            for rng in range_ratios:
-                for trend in trend_lookbacks:
-                    for lb in lookbacks:
-                        combo_count += 1
-                        self.volume_mult = vol
-                        self.range_ratio_max = rng
-                        self.trend_lookback = trend
-                        self.lookback_bars = lb
+            volume_mults = [1.5, 1.8, 2.0, 2.5]
+            range_ratios = [0.3, 0.4, 0.5, 0.6]
+            delta_z_thresholds = [0.5, 1.0, 1.5, 2.0]
+            lookbacks = [15, 20, 30]
+            trade_flow_thresholds = [0.52, 0.55, 0.60]
+            require_trend_confirms = [True, False]
 
-                        signals = self.detect_signals(df.clone())
-                        if len(signals) < 10:
-                            continue
+            total_combos = (len(volume_mults) * len(range_ratios) * len(delta_z_thresholds) *
+                          len(lookbacks) * len(trade_flow_thresholds) * len(require_trend_confirms))
 
-                        bt_results = self.calculate_forward_returns(df, signals)
-                        if len(bt_results) < 10:
-                            continue
+            logger.info(f"Testing {total_combos} trade flow parameter combinations...")
 
-                        summary = self.calculate_summary(bt_results)
-                        if summary.hit_rate_5 > 50:
-                            results.append(summary)
+            combo_count = 0
+            for vol, rng, dz, lb, tf, rtc in product(
+                volume_mults, range_ratios, delta_z_thresholds, lookbacks, trade_flow_thresholds, require_trend_confirms
+            ):
+                combo_count += 1
+                self.volume_mult = vol
+                self.range_ratio_max = rng
+                self.delta_z_threshold = dz
+                self.lookback_bars = lb
+                self.trade_flow_threshold = tf
+                self.require_trend_confirm = rtc
+                self.trend_lookback = 5  # Fixed for trade flow mode
 
-                        if combo_count % 50 == 0:
-                            logger.info(f"Progress: {combo_count}/{total_combos}")
+                signals = self.detect_signals(df.clone())
+                if len(signals) < 10:
+                    continue
 
-        results.sort(key=lambda x: (x.hit_rate_5, x.profit_factor), reverse=True)
+                bt_results = self.calculate_forward_returns(df, signals)
+                if len(bt_results) < 10:
+                    continue
+
+                summary = self.calculate_summary(bt_results)
+                if summary.total_signals >= 10:
+                    results.append(summary)
+
+                if combo_count % 100 == 0:
+                    logger.info(f"Progress: {combo_count}/{total_combos}")
+
+        else:
+            # Legacy parameter sweep
+            volume_mults = [1.3, 1.5, 1.8, 2.0, 2.5]
+            range_ratios = [0.3, 0.4, 0.5, 0.6, 0.7]
+            trend_lookbacks = [3, 5, 10]
+            lookbacks = [15, 20, 30]
+
+            total_combos = len(volume_mults) * len(range_ratios) * len(trend_lookbacks) * len(lookbacks)
+
+            logger.info(f"Testing {total_combos} legacy parameter combinations...")
+
+            combo_count = 0
+            for vol in volume_mults:
+                for rng in range_ratios:
+                    for trend in trend_lookbacks:
+                        for lb in lookbacks:
+                            combo_count += 1
+                            self.volume_mult = vol
+                            self.range_ratio_max = rng
+                            self.trend_lookback = trend
+                            self.lookback_bars = lb
+
+                            signals = self.detect_signals(df.clone())
+                            if len(signals) < 10:
+                                continue
+
+                            bt_results = self.calculate_forward_returns(df, signals)
+                            if len(bt_results) < 10:
+                                continue
+
+                            summary = self.calculate_summary(bt_results)
+                            if summary.hit_rate_5 > 50:
+                                results.append(summary)
+
+                            if combo_count % 50 == 0:
+                                logger.info(f"Progress: {combo_count}/{total_combos}")
+
+        # Sort by profit factor (more useful than hit rate alone)
+        results.sort(key=lambda x: (x.profit_factor, x.hit_rate_5), reverse=True)
         return results
 
 
@@ -494,28 +604,51 @@ def main():
     parser.add_argument("--trend-lookback", type=int, default=5, help="Bars for trend direction")
     parser.add_argument("--lookback", type=int, default=20, help="Bars for rolling averages")
 
+    # Trade flow parameters
+    parser.add_argument("--no-trade-flow", action="store_true", help="Use legacy mode instead of trade flow")
+    parser.add_argument("--delta-z", type=float, default=1.0, help="Delta z-score threshold")
+    parser.add_argument("--trade-flow-threshold", type=float, default=0.55, help="Trade flow ratio threshold")
+    parser.add_argument("--no-trend-confirm", action="store_true", help="Don't require trend confirmation")
+
     args = parser.parse_args()
 
+    use_trade_flow = not args.no_trade_flow
+
     if args.sweep:
-        print("\nRunning Exhaustion parameter sweep...")
-        backtester = ExhaustionBacktester()
+        mode = "trade flow" if use_trade_flow else "legacy"
+        print(f"\nRunning Exhaustion parameter sweep ({mode} mode)...")
+
+        backtester = ExhaustionBacktester(use_trade_flow=use_trade_flow)
         results = backtester.run_parameter_sweep(
             timeframe=args.timeframe,
             symbol=args.symbol,
             limit=args.limit,
+            use_trade_flow=use_trade_flow,
         )
 
         if not results:
-            print("No valid parameter combinations found (all hit rates <= 50%)")
+            print("No valid parameter combinations found")
         else:
-            print(f"\nTop 10 parameter combinations (by 5-bar hit rate):\n")
-            print(f"{'VolMult':>8} {'RngMax':>8} {'Trend':>6} {'LB':>6} {'Sigs':>6} {'Hit5%':>8} {'PF':>8}")
-            print("-" * 60)
-            for r in results[:10]:
-                p = r.parameters
-                print(f"{p['volume_mult']:>8.1f} {p['range_ratio_max']:>8.2f} "
-                      f"{p['trend_lookback']:>6} {p['lookback_bars']:>6} "
-                      f"{r.total_signals:>6} {r.hit_rate_5:>8.1f} {r.profit_factor:>8.2f}")
+            print(f"\nTop 10 parameter combinations (sorted by profit factor):\n")
+
+            if use_trade_flow:
+                print(f"{'VolMult':>8} {'RngMax':>8} {'DeltaZ':>8} {'TF_Thr':>8} {'TrConf':>7} {'LB':>4} {'Sigs':>6} {'Hit5%':>8} {'PF':>8}")
+                print("-" * 85)
+                for r in results[:10]:
+                    p = r.parameters
+                    tc = "Yes" if p.get('require_trend_confirm', True) else "No"
+                    print(f"{p['volume_mult']:>8.1f} {p['range_ratio_max']:>8.2f} "
+                          f"{p.get('delta_z_threshold', 1.0):>8.1f} {p.get('trade_flow_threshold', 0.55):>8.2f} "
+                          f"{tc:>7} {p['lookback_bars']:>4} "
+                          f"{r.total_signals:>6} {r.hit_rate_5:>8.1f} {r.profit_factor:>8.2f}")
+            else:
+                print(f"{'VolMult':>8} {'RngMax':>8} {'Trend':>6} {'LB':>6} {'Sigs':>6} {'Hit5%':>8} {'PF':>8}")
+                print("-" * 60)
+                for r in results[:10]:
+                    p = r.parameters
+                    print(f"{p['volume_mult']:>8.1f} {p['range_ratio_max']:>8.2f} "
+                          f"{p['trend_lookback']:>6} {p['lookback_bars']:>6} "
+                          f"{r.total_signals:>6} {r.hit_rate_5:>8.1f} {r.profit_factor:>8.2f}")
 
             print("\n" + "=" * 60)
             print("Best parameters:")
@@ -527,6 +660,10 @@ def main():
             range_ratio_max=args.range_ratio,
             trend_lookback=args.trend_lookback,
             lookback_bars=args.lookback,
+            use_trade_flow=use_trade_flow,
+            delta_z_threshold=args.delta_z,
+            trade_flow_threshold=args.trade_flow_threshold,
+            require_trend_confirm=not args.no_trend_confirm,
         )
 
         df = backtester.load_data(

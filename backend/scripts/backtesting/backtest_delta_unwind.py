@@ -11,10 +11,17 @@ Signal Logic:
 2. Delta starts reversing direction (unwind begins)
 3. Trade in direction of unwind (fade the prior move)
 
+Modes:
+- delta_only: Pure delta-based detection (baseline)
+- trade_flow: Require trade_flow_ratio to confirm unwind direction
+- volume: Require elevated volume during unwind
+- dom: Require DOM imbalance to support unwind direction
+- all: Combine all confirmations
+
 Usage:
-    python scripts/backtest_delta_unwind.py --timeframe 5M
-    python scripts/backtest_delta_unwind.py --timeframe 15M --sweep
-    python scripts/backtest_delta_unwind.py --timeframe 1M --show-signals
+    python scripts/backtest_delta_unwind.py --timeframe 15M --sweep --mode delta_only
+    python scripts/backtest_delta_unwind.py --timeframe 15M --sweep --mode trade_flow
+    python scripts/backtest_delta_unwind.py --timeframe 15M --sweep --mode all
 """
 import os
 import sys
@@ -25,8 +32,8 @@ from dataclasses import dataclass
 from typing import List, Optional
 from datetime import datetime
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add backend directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import polars as pl
 from app.data.storage import DuckDBStorage
@@ -80,12 +87,21 @@ class BacktestSummary:
 class DeltaUnwindBacktester:
     """Backtester for Delta Unwind signals"""
 
+    # Valid modes for signal detection
+    MODES = ["delta_only", "trade_flow", "volume", "dom", "both", "all"]
+
     def __init__(
         self,
         zscore_threshold: float = 2.0,  # Z-score threshold for "extreme" delta
         unwind_pct: float = 0.1,  # Min % of delta that must unwind
         unwind_bars: int = 3,  # Bars to look for unwind confirmation
         lookback_bars: int = 50,  # Bars for rolling stats
+        mode: str = "delta_only",  # Detection mode
+        # Mode-specific parameters
+        tf_threshold: float = 0.55,  # Trade flow ratio threshold (>0.5 = more buys)
+        vol_mult: float = 1.5,  # Volume multiplier for unwind bar
+        dom_threshold: float = 0.1,  # DOM imbalance threshold (positive = bid heavy)
+        large_trade_min: int = 1,  # Min large trades during unwind
     ):
         """Initialize backtester with detection parameters
 
@@ -94,22 +110,41 @@ class DeltaUnwindBacktester:
             unwind_pct: Minimum % of peak delta that must unwind
             unwind_bars: Bars to confirm unwind is happening
             lookback_bars: Bars for calculating rolling mean/std
+            mode: Detection mode (delta_only, trade_flow, volume, dom, all)
+            tf_threshold: Trade flow ratio threshold for confirmation
+            vol_mult: Volume multiplier threshold
+            dom_threshold: DOM imbalance threshold for confirmation
+            large_trade_min: Minimum large trades during unwind
         """
         self.zscore_threshold = zscore_threshold
         self.unwind_pct = unwind_pct
         self.unwind_bars = unwind_bars
         self.lookback_bars = lookback_bars
+        self.mode = mode if mode in self.MODES else "delta_only"
+        self.tf_threshold = tf_threshold
+        self.vol_mult = vol_mult
+        self.dom_threshold = dom_threshold
+        self.large_trade_min = large_trade_min
 
         self.db = DuckDBStorage()
 
     def get_parameters(self) -> dict:
         """Return current parameters as dict"""
-        return {
+        params = {
+            "mode": self.mode,
             "zscore_threshold": self.zscore_threshold,
             "unwind_pct": self.unwind_pct,
             "unwind_bars": self.unwind_bars,
             "lookback_bars": self.lookback_bars,
         }
+        # Add mode-specific params
+        if self.mode in ["trade_flow", "both", "all"]:
+            params["tf_threshold"] = self.tf_threshold
+        if self.mode in ["volume", "both", "all"]:
+            params["vol_mult"] = self.vol_mult
+        if self.mode in ["dom", "all"]:
+            params["dom_threshold"] = self.dom_threshold
+        return params
 
     def load_data(
         self,
@@ -119,19 +154,10 @@ class DeltaUnwindBacktester:
         end_date: Optional[str] = None,
         limit: int = 100000,
     ) -> pl.DataFrame:
-        """Load historical data by aggregating MBP ticks into bars"""
-        tf_map = {
-            "1M": "1 minute",
-            "5M": "5 minutes",
-            "15M": "15 minutes",
-            "30M": "30 minutes",
-            "1H": "1 hour",
-            "4H": "4 hours",
-            "1D": "1 day",
-        }
-        interval = tf_map.get(timeframe, "1 minute")
-
-        where_clauses = [f"symbol = '{symbol}'"]
+        """Load historical OHLCV data with orderflow metrics"""
+        where_clauses = [f"symbol = '{symbol}'", f"timeframe = '{timeframe}'"]
+        # Only load bars with orderflow data (instant_delta is not null)
+        where_clauses.append("instant_delta IS NOT NULL")
         if start_date:
             where_clauses.append(f"timestamp >= '{start_date}'")
         if end_date:
@@ -139,36 +165,82 @@ class DeltaUnwindBacktester:
 
         where_str = " AND ".join(where_clauses)
 
-        # Aggregate MBP ticks into bars
-        # Fix unsigned overflow: convert values > 2^31 to signed
         query = f"""
-            WITH bars AS (
-                SELECT
-                    time_bucket(INTERVAL '{interval}', timestamp) as bar_time,
-                    FIRST(mid_price) as open,
-                    MAX(mid_price) as high,
-                    MIN(mid_price) as low,
-                    LAST(mid_price) as close,
-                    COUNT(*) as volume,
-                    SUM(CASE WHEN delta > 2147483647 THEN CAST(delta AS BIGINT) - 4294967296 ELSE delta END) as bar_delta,
-                    AVG(dom_imbalance) as dom_imbalance
-                FROM mbp_ticks
-                WHERE {where_str}
-                GROUP BY bar_time
-                ORDER BY bar_time ASC
-            )
-            SELECT * FROM bars
-            WHERE open IS NOT NULL
+            SELECT
+                timestamp,
+                open, high, low, close, volume,
+                instant_delta as bar_delta,
+                dom_imbalance,
+                cvd,
+                trade_flow_ratio,
+                large_trade_count
+            FROM ohlcv_ticks
+            WHERE {where_str}
+            ORDER BY timestamp ASC
             LIMIT {limit}
         """
 
         df = self.db.conn.execute(query).pl()
+        logger.info(f"Loaded {len(df)} bars with orderflow for {symbol} {timeframe}")
 
-        if "bar_time" in df.columns:
-            df = df.rename({"bar_time": "timestamp"})
+        # Log data availability for mode columns
+        if self.mode != "delta_only":
+            tf_count = df.filter(pl.col("trade_flow_ratio").is_not_null()).height
+            dom_count = df.filter(pl.col("dom_imbalance").is_not_null()).height
+            lt_count = df.filter(pl.col("large_trade_count").is_not_null()).height
+            logger.info(f"Mode data availability - trade_flow: {tf_count}, dom: {dom_count}, large_trades: {lt_count}")
 
-        logger.info(f"Loaded {len(df)} bars from MBP ticks for {symbol} {timeframe}")
         return df
+
+    def _check_mode_confirmations(
+        self,
+        future_row: dict,
+        direction: str,
+        avg_volume: float,
+    ) -> bool:
+        """Check mode-specific confirmations for unwind signal
+
+        Args:
+            future_row: The bar data at signal time
+            direction: BULLISH or BEARISH
+            avg_volume: Rolling average volume for comparison
+
+        Returns:
+            True if all mode confirmations pass
+        """
+        if self.mode == "delta_only":
+            return True
+
+        # Trade flow confirmation: ratio should support unwind direction
+        if self.mode in ["trade_flow", "both", "all"]:
+            tf_ratio = future_row.get("trade_flow_ratio")
+            if tf_ratio is not None:
+                # BULLISH unwind: need more buying (tf_ratio > threshold)
+                # BEARISH unwind: need more selling (tf_ratio < 1 - threshold)
+                if direction == "BULLISH" and tf_ratio < self.tf_threshold:
+                    return False
+                if direction == "BEARISH" and tf_ratio > (1 - self.tf_threshold):
+                    return False
+
+        # Volume confirmation: elevated volume during unwind
+        if self.mode in ["volume", "both", "all"]:
+            volume = future_row.get("volume")
+            if volume is not None and avg_volume > 0:
+                if volume < avg_volume * self.vol_mult:
+                    return False
+
+        # DOM confirmation: order book should support unwind direction
+        if self.mode in ["dom", "all"]:
+            dom = future_row.get("dom_imbalance")
+            if dom is not None:
+                # BULLISH unwind: need positive DOM (more bids)
+                # BEARISH unwind: need negative DOM (more asks)
+                if direction == "BULLISH" and dom < self.dom_threshold:
+                    return False
+                if direction == "BEARISH" and dom > -self.dom_threshold:
+                    return False
+
+        return True
 
     def detect_signals(self, df: pl.DataFrame) -> List[DeltaUnwindSignal]:
         """Detect Delta Unwind signals in the data
@@ -177,7 +249,8 @@ class DeltaUnwindBacktester:
         1. Calculate cumulative delta
         2. Find when cumulative delta reaches extreme (high z-score)
         3. Detect when delta starts unwinding (reversing)
-        4. Signal in direction of unwind
+        4. Apply mode-specific confirmations
+        5. Signal in direction of unwind
         """
         signals = []
 
@@ -193,6 +266,7 @@ class DeltaUnwindBacktester:
         df = df.with_columns([
             pl.col("cum_delta").rolling_mean(window_size=self.lookback_bars).alias("delta_mean"),
             pl.col("cum_delta").rolling_std(window_size=self.lookback_bars).alias("delta_std"),
+            pl.col("volume").rolling_mean(window_size=self.lookback_bars).alias("avg_volume"),
         ])
 
         # Calculate z-score
@@ -212,6 +286,7 @@ class DeltaUnwindBacktester:
 
             zscore = row["delta_zscore"]
             cum_delta = row["cum_delta"]
+            avg_volume = row.get("avg_volume", 0) or 0
 
             # Check for extreme positive delta (potential bearish unwind)
             if zscore > self.zscore_threshold and cum_delta > 0:
@@ -228,6 +303,10 @@ class DeltaUnwindBacktester:
                     unwind_pct = unwind_amount / abs(peak_delta) if peak_delta != 0 else 0
 
                     if unwind_pct > self.unwind_pct:
+                        # Check mode-specific confirmations
+                        if not self._check_mode_confirmations(future_row, "BEARISH", avg_volume):
+                            continue
+
                         strength = min(1.0, abs(zscore) / (self.zscore_threshold * 2))
                         signals.append(DeltaUnwindSignal(
                             timestamp=future_row["timestamp"],
@@ -255,6 +334,10 @@ class DeltaUnwindBacktester:
                     unwind_pct = unwind_amount / abs(trough_delta) if trough_delta != 0 else 0
 
                     if unwind_pct > self.unwind_pct:
+                        # Check mode-specific confirmations
+                        if not self._check_mode_confirmations(future_row, "BULLISH", avg_volume):
+                            continue
+
                         strength = min(1.0, abs(zscore) / (self.zscore_threshold * 2))
                         signals.append(DeltaUnwindSignal(
                             timestamp=future_row["timestamp"],
@@ -267,7 +350,7 @@ class DeltaUnwindBacktester:
                         ))
                         break
 
-        logger.info(f"Detected {len(signals)} Delta Unwind signals")
+        logger.info(f"Detected {len(signals)} Delta Unwind signals (mode: {self.mode})")
         return signals
 
     def calculate_forward_returns(
@@ -379,55 +462,73 @@ class DeltaUnwindBacktester:
             logger.error("No data loaded")
             return []
 
-        # Parameter ranges to test
+        # Core parameter ranges
         zscore_thresholds = [1.5, 2.0, 2.5, 3.0]
         unwind_pcts = [0.05, 0.10, 0.15, 0.20, 0.30]
         unwind_bars_list = [2, 3, 5, 8]
         lookbacks = [30, 50, 100]
 
-        results = []
-        total_combos = len(zscore_thresholds) * len(unwind_pcts) * len(unwind_bars_list) * len(lookbacks)
+        # Mode-specific parameter ranges
+        tf_thresholds = [0.55] if self.mode not in ["trade_flow", "both", "all"] else [0.52, 0.55, 0.58, 0.60]
+        vol_mults = [1.5] if self.mode not in ["volume", "both", "all"] else [1.2, 1.5, 1.8, 2.0]
+        dom_thresholds = [0.1] if self.mode not in ["dom", "all"] else [0.05, 0.10, 0.15, 0.20]
 
-        logger.info(f"Testing {total_combos} parameter combinations...")
+        results = []
+        total_combos = (
+            len(zscore_thresholds) * len(unwind_pcts) * len(unwind_bars_list) *
+            len(lookbacks) * len(tf_thresholds) * len(vol_mults) * len(dom_thresholds)
+        )
+
+        logger.info(f"Testing {total_combos} parameter combinations for mode '{self.mode}'...")
 
         combo_count = 0
         for zscore in zscore_thresholds:
             for unwind in unwind_pcts:
                 for bars in unwind_bars_list:
                     for lb in lookbacks:
-                        combo_count += 1
-                        self.zscore_threshold = zscore
-                        self.unwind_pct = unwind
-                        self.unwind_bars = bars
-                        self.lookback_bars = lb
+                        for tf_thr in tf_thresholds:
+                            for vol_m in vol_mults:
+                                for dom_thr in dom_thresholds:
+                                    combo_count += 1
+                                    self.zscore_threshold = zscore
+                                    self.unwind_pct = unwind
+                                    self.unwind_bars = bars
+                                    self.lookback_bars = lb
+                                    self.tf_threshold = tf_thr
+                                    self.vol_mult = vol_m
+                                    self.dom_threshold = dom_thr
 
-                        signals = self.detect_signals(df.clone())
-                        if len(signals) < 10:
-                            continue
+                                    signals = self.detect_signals(df.clone())
+                                    if len(signals) < 5:  # Lower threshold for filtered modes
+                                        continue
 
-                        bt_results = self.calculate_forward_returns(df, signals)
-                        if len(bt_results) < 10:
-                            continue
+                                    bt_results = self.calculate_forward_returns(df, signals)
+                                    if len(bt_results) < 5:
+                                        continue
 
-                        summary = self.calculate_summary(bt_results)
-                        if summary.hit_rate_5 > 50:
-                            results.append(summary)
+                                    summary = self.calculate_summary(bt_results)
+                                    if summary.hit_rate_5 > 50:
+                                        results.append(summary)
 
-                        if combo_count % 50 == 0:
-                            logger.info(f"Progress: {combo_count}/{total_combos}")
+                                    if combo_count % 100 == 0:
+                                        logger.info(f"Progress: {combo_count}/{total_combos}")
 
-        results.sort(key=lambda x: (x.hit_rate_5, x.profit_factor), reverse=True)
+        results.sort(key=lambda x: (x.profit_factor, x.hit_rate_5), reverse=True)
         return results
 
 
 def print_summary(summary: BacktestSummary):
     """Pretty print backtest summary"""
+    mode = summary.parameters.get("mode", "delta_only")
     print("\n" + "=" * 60)
-    print("DELTA UNWIND BACKTEST RESULTS")
+    print(f"DELTA UNWIND BACKTEST RESULTS (mode: {mode})")
     print("=" * 60)
     print(f"\nParameters:")
     for k, v in summary.parameters.items():
-        print(f"  {k}: {v}")
+        if isinstance(v, float):
+            print(f"  {k}: {v:.3f}")
+        else:
+            print(f"  {k}: {v}")
 
     print(f"\nSignals Detected: {summary.total_signals}")
     print(f"  Bullish: {summary.bullish_signals}")
@@ -493,17 +594,27 @@ def main():
     parser.add_argument("--sweep", action="store_true", help="Run parameter sweep")
     parser.add_argument("--show-signals", action="store_true", help="Show individual signals")
 
-    # Detection parameters
+    # Mode selection
+    parser.add_argument("--mode", "-m", default="delta_only",
+                       choices=DeltaUnwindBacktester.MODES,
+                       help="Detection mode: delta_only, trade_flow, volume, dom, all")
+
+    # Core detection parameters
     parser.add_argument("--zscore", type=float, default=2.0, help="Z-score threshold for extreme")
-    parser.add_argument("--unwind-pct", type=float, default=0.1, help="Min % of delta that must unwind")
+    parser.add_argument("--unwind-pct", type=float, default=0.1, help="Min %% of delta that must unwind")
     parser.add_argument("--unwind-bars", type=int, default=3, help="Bars to confirm unwind")
     parser.add_argument("--lookback", type=int, default=50, help="Bars for rolling stats")
+
+    # Mode-specific parameters
+    parser.add_argument("--tf-threshold", type=float, default=0.55, help="Trade flow ratio threshold")
+    parser.add_argument("--vol-mult", type=float, default=1.5, help="Volume multiplier for unwind bar")
+    parser.add_argument("--dom-threshold", type=float, default=0.1, help="DOM imbalance threshold")
 
     args = parser.parse_args()
 
     if args.sweep:
-        print("\nRunning Delta Unwind parameter sweep...")
-        backtester = DeltaUnwindBacktester()
+        print(f"\nRunning Delta Unwind parameter sweep (mode: {args.mode})...")
+        backtester = DeltaUnwindBacktester(mode=args.mode)
         results = backtester.run_parameter_sweep(
             timeframe=args.timeframe,
             symbol=args.symbol,
@@ -511,16 +622,34 @@ def main():
         )
 
         if not results:
-            print("No valid parameter combinations found (all hit rates <= 50%)")
+            print(f"No valid parameter combinations found for mode '{args.mode}' (all hit rates <= 50%)")
         else:
-            print(f"\nTop 10 parameter combinations (by 5-bar hit rate):\n")
-            print(f"{'Z-Score':>8} {'Unwind%':>8} {'Bars':>6} {'LB':>6} {'Sigs':>6} {'Hit5%':>8} {'PF':>8}")
-            print("-" * 60)
+            print(f"\nTop 10 parameter combinations (mode: {args.mode}, sorted by PF):\n")
+
+            # Build header based on mode
+            header = f"{'Z-Score':>8} {'Unwind%':>8} {'Bars':>6} {'LB':>6}"
+            if args.mode in ["trade_flow", "both", "all"]:
+                header += f" {'TF_Thr':>7}"
+            if args.mode in ["volume", "both", "all"]:
+                header += f" {'VolM':>6}"
+            if args.mode in ["dom", "all"]:
+                header += f" {'DOM':>6}"
+            header += f" {'Sigs':>6} {'Hit5%':>8} {'PF':>8}"
+            print(header)
+            print("-" * len(header))
+
             for r in results[:10]:
                 p = r.parameters
-                print(f"{p['zscore_threshold']:>8.1f} {p['unwind_pct']*100:>8.1f} "
-                      f"{p['unwind_bars']:>6} {p['lookback_bars']:>6} "
-                      f"{r.total_signals:>6} {r.hit_rate_5:>8.1f} {r.profit_factor:>8.2f}")
+                row = f"{p['zscore_threshold']:>8.1f} {p['unwind_pct']*100:>8.1f} "
+                row += f"{p['unwind_bars']:>6} {p['lookback_bars']:>6}"
+                if args.mode in ["trade_flow", "both", "all"]:
+                    row += f" {p.get('tf_threshold', 0.55):>7.2f}"
+                if args.mode in ["volume", "both", "all"]:
+                    row += f" {p.get('vol_mult', 1.5):>6.1f}"
+                if args.mode in ["dom", "all"]:
+                    row += f" {p.get('dom_threshold', 0.1):>6.2f}"
+                row += f" {r.total_signals:>6} {r.hit_rate_5:>8.1f} {r.profit_factor:>8.2f}"
+                print(row)
 
             print("\n" + "=" * 60)
             print("Best parameters:")
@@ -532,6 +661,10 @@ def main():
             unwind_pct=args.unwind_pct,
             unwind_bars=args.unwind_bars,
             lookback_bars=args.lookback,
+            mode=args.mode,
+            tf_threshold=args.tf_threshold,
+            vol_mult=args.vol_mult,
+            dom_threshold=args.dom_threshold,
         )
 
         df = backtester.load_data(

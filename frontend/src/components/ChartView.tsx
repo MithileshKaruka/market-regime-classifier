@@ -16,6 +16,7 @@ import {
 } from '../config'
 import { useWebSocket } from '../hooks/useWebSocket'
 import type { BarData, SignalData } from '../types/websocket'
+import { ZonePrimitive, type ZoneData } from './ZonePrimitive'
 import './ChartView.css'
 
 interface ChartBar {
@@ -59,6 +60,8 @@ interface OrderflowSignal {
   details: string
 }
 
+// Zone interface is imported from ZonePrimitive as ZoneData
+
 interface ChartViewProps {
   timeframe: string
   onTimeframeChange?: (tf: Timeframe) => void
@@ -84,6 +87,9 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
     'Absorption', 'LSF', 'OB Imb', 'Delta Unwind', 'Exhaustion', 'Institutional', 'TF Div'
   ])
   const [showSignalMenu, setShowSignalMenu] = useState(false)
+  const [showZones, setShowZones] = useState(false)
+  const [zones, setZones] = useState<ZoneData[]>([])
+  const zonePrimitivesRef = useRef<ZonePrimitive[]>([])  // Track zone primitives
   const chartViewRef = useRef<HTMLDivElement>(null)
 
   // Lazy loading state
@@ -519,9 +525,15 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
             candlestickSeriesRef.current?.removePriceLine(line)
           })
           priceLinesRef.current = []
+          // Clear zone primitives
+          zonePrimitivesRef.current.forEach(primitive => {
+            candlestickSeriesRef.current?.detachPrimitive(primitive)
+          })
+          zonePrimitivesRef.current = []
           // Clear state
           setLoadedBars([])
           loadedBarsRef.current = []
+          setZones([])
         }
 
         // Always request all indicators so we have the data available for toggling
@@ -529,10 +541,11 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
         const priceRangeParam = priceRangePct !== THRESHOLDS.srRange.default ? `?price_range_pct=${priceRangePct}` : ''
 
         // Fetch ALL data in PARALLEL to prevent visual flash when switching timeframes
-        const [chartResponse, signalsResponse, srResponse] = await Promise.all([
+        const [chartResponse, signalsResponse, srResponse, zonesResponse] = await Promise.all([
           fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.chart}/${timeframe}?limit=${CHART_CONFIG.initialLoad}&offset=0&indicators=${allIndicators}`, { signal: controller.signal }),
           fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.orderflowSignals}/${timeframe}?limit=${CHART_CONFIG.signalsLimit}`, { signal: controller.signal }),
-          fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.supportResistance}/${timeframe}${priceRangeParam}`, { signal: controller.signal })
+          fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.supportResistance}/${timeframe}${priceRangeParam}`, { signal: controller.signal }),
+          fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.zones}/${timeframe}?limit=50`, { signal: controller.signal })
         ])
         clearTimeout(timeoutId)
 
@@ -555,7 +568,13 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
           srData = await srResponse.json()
         }
 
-        console.log(`[Chart] Loaded ${bars.length} bars, ${signals.length} signals, S/R: ${srData ? 'yes' : 'no'}`)
+        let zonesData: ZoneData[] = []
+        if (zonesResponse.ok) {
+          const zonesJson = await zonesResponse.json()
+          zonesData = zonesJson.zones || []
+        }
+
+        console.log(`[Chart] Loaded ${bars.length} bars, ${signals.length} signals, S/R: ${srData ? 'yes' : 'no'}, Zones: ${zonesData.length}`)
 
         // Check if chart was disposed during fetch
         if (isChartDisposedRef.current) {
@@ -568,12 +587,19 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
         setLoadedBars(bars)
         loadedBarsRef.current = bars
         setOrderflowSignals(signals)
+        setZones(zonesData)
 
         // Clear old price lines BEFORE updating chart
         priceLinesRef.current.forEach(line => {
           candlestickSeriesRef.current?.removePriceLine(line)
         })
         priceLinesRef.current = []
+
+        // Clear old zone primitives
+        zonePrimitivesRef.current.forEach(primitive => {
+          candlestickSeriesRef.current?.detachPrimitive(primitive)
+        })
+        zonePrimitivesRef.current = []
 
         // Render chart with candles
         updateChartWithBars(bars)
@@ -657,6 +683,24 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
           console.log(`Total price lines drawn: ${priceLinesRef.current.length}`)
         }
 
+        // Draw Supply/Demand zones as filled rectangles starting from formation time
+        // Filter out broken zones - only show UNTESTED and HELD
+        if (showZones && zonesData.length > 0 && chartRef.current && candlestickSeriesRef.current) {
+          const activeZones = zonesData.filter((z: ZoneData) => z.status !== 'BROKEN')
+          console.log(`Drawing ${activeZones.length} active zones (${zonesData.length - activeZones.length} broken filtered)`)
+          activeZones.forEach((z: ZoneData) => {
+            console.log(`  Zone: ${z.zone_type} ${z.price_low.toFixed(0)}-${z.price_high.toFixed(0)} status=${z.status} Q=${z.quality.toFixed(0)}`)
+          })
+
+          activeZones.forEach((zone: ZoneData) => {
+            const primitive = new ZonePrimitive(chartRef.current!, candlestickSeriesRef.current!, zone)
+            candlestickSeriesRef.current?.attachPrimitive(primitive)
+            zonePrimitivesRef.current.push(primitive)
+          })
+
+          console.log(`Zone primitives attached: ${zonePrimitivesRef.current.length}`)
+        }
+
         // Fit content to view on load
         if (chartRef.current) {
           chartRef.current.timeScale().fitContent()
@@ -676,6 +720,27 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
 
     fetchChartData()
   }, [timeframe, priceRangePct]) // Only refetch on timeframe or S/R range change, NOT on indicator change
+
+  // Redraw zones when showZones toggle changes
+  useEffect(() => {
+    if (isChartDisposedRef.current || !candlestickSeriesRef.current || !chartRef.current) return
+
+    // Clear existing zone primitives
+    zonePrimitivesRef.current.forEach(primitive => {
+      candlestickSeriesRef.current?.detachPrimitive(primitive)
+    })
+    zonePrimitivesRef.current = []
+
+    // Redraw if enabled - filter out broken zones
+    if (showZones && zones.length > 0) {
+      const activeZones = zones.filter((z: ZoneData) => z.status !== 'BROKEN')
+      activeZones.forEach((zone: ZoneData) => {
+        const primitive = new ZonePrimitive(chartRef.current!, candlestickSeriesRef.current!, zone)
+        candlestickSeriesRef.current?.attachPrimitive(primitive)
+        zonePrimitivesRef.current.push(primitive)
+      })
+    }
+  }, [showZones, zones])
 
   const toggleIndicator = (key: string) => {
     const indicator = AVAILABLE_INDICATORS.find(ind => ind.key === key)
@@ -945,6 +1010,22 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
             title={isFullscreen ? 'Exit Fullscreen (ESC)' : 'Fullscreen'}
           >
             {isFullscreen ? '⛶ Exit' : '⛶ Fullscreen'}
+          </button>
+          <button
+            onClick={() => setShowZones(!showZones)}
+            style={{
+              padding: '4px 12px',
+              borderRadius: '4px',
+              border: showZones ? `1px solid ${COLORS.border.active}` : `1px solid ${COLORS.border.light}`,
+              background: showZones ? COLORS.background.buttonHover : COLORS.background.button,
+              color: showZones ? COLORS.text.white : COLORS.text.secondary,
+              cursor: 'pointer',
+              fontSize: '12px',
+              fontWeight: showZones ? 600 : 400,
+            }}
+            title="Toggle Supply/Demand zones"
+          >
+            Zones ({zones.length})
           </button>
           <div style={{ position: 'relative' }}>
             <button

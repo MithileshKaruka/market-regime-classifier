@@ -25,6 +25,7 @@ from langgraph.graph.message import add_messages
 from app.features.agent_bias import AgentBiasCalculator, AgentMode, AgentBiasResult
 from app.features.orderflow_metrics import OrderflowMetricsCalculator
 from app.features.orderflow_signals import OrderflowSignalDetector
+from app.features.zone_bias import ZoneBiasScorer
 from app.data.storage import DuckDBStorage
 import polars as pl
 
@@ -76,6 +77,12 @@ class AgentState(TypedDict, total=False):
     action_reason: str
     stop_loss: Optional[float]
     take_profit: Optional[float]
+
+    # Zone-aware bias
+    zone_bias: Optional[float]
+    zone_type: Optional[str]  # DEMAND or SUPPLY
+    zone_quality: Optional[float]
+    zone_confirmed: Optional[bool]
 
     # Metadata
     iteration: int
@@ -148,9 +155,17 @@ def evaluate_bias(state: AgentState) -> AgentState:
 
     Uses the AgentBiasCalculator to compute:
     - Trend & Structure score (20%)
-    - Market Intensity score (30%)
-    - Order Flow Alpha score (50%)
+    - Market Intensity score (20%)
+    - Order Flow Alpha score (60%)
+
+    Zone-Aware Enhancement:
+    - Detects S/D zones on the analysis timeframe
+    - Uses 15M orderflow signals for confirmation (always)
+    - Adjusts final bias based on zone proximity
     """
+    timeframe = state.get("timeframe", "1H")
+    symbol = state.get("symbol", "MNQ")
+
     # Deserialize market data from state
     market_data_list = state.get("_market_df", [])
     if not market_data_list:
@@ -192,25 +207,64 @@ def evaluate_bias(state: AgentState) -> AgentState:
     vpin_metrics = metrics_calc.calculate_vpin(df)
     ldr_metrics = metrics_calc.calculate_ldr(df)
 
-    # Get recent signals
-    detector = OrderflowSignalDetector(lookback_bars=20)
-    recent_df = df.tail(20)
-    recent_df = recent_df.with_columns([
-        (pl.col("volume") * pl.col("dom_imbalance")).alias("total_bid_depth"),
-        (pl.col("volume") * (1 - pl.col("dom_imbalance"))).alias("total_ask_depth"),
-    ])
+    # ============================================================
+    # Zone-Aware Orderflow: Use 15M signals for HTF analysis
+    # ============================================================
+    # For higher timeframes (1H, 4H, 1D), orderflow signals work best on 15M
+    # So we fetch 15M data and use those signals instead of same-TF signals
 
-    absorption_signals = detector.detect_absorption(recent_df)
-    lsf_signals = detector.detect_lsf(recent_df)
+    is_higher_tf = timeframe in ("1H", "4H", "1D")
+    zone_scorer = ZoneBiasScorer()
 
-    abs_dicts = [{"direction": s.direction.value, "strength": s.strength} for s in absorption_signals]
-    lsf_dicts = [{"direction": s.direction.value, "strength": s.strength} for s in lsf_signals]
+    if is_higher_tf:
+        # Get 15M orderflow score and signals for higher timeframes
+        logger.info(f"[Evaluate] Using 15M orderflow signals for {timeframe} analysis")
+        of_score_15m, active_signals_15m = zone_scorer.get_15m_orderflow_score(symbol)
+
+        # Convert active signals to dict format for bias calculator
+        abs_dicts = [{"direction": "BULLISH" if "+" in s else "BEARISH", "strength": 0.8}
+                     for s in active_signals_15m if s.startswith("ABS")]
+        exh_dicts = [{"direction": "BULLISH" if "+" in s else "BEARISH", "strength": 0.8}
+                     for s in active_signals_15m if s.startswith("EXH")]
+        du_dicts = [{"direction": "BULLISH" if "+" in s else "BEARISH", "strength": 0.8}
+                    for s in active_signals_15m if s.startswith("DU")]
+    else:
+        # Use same-timeframe signals for 5M and 15M
+        detector = OrderflowSignalDetector(timeframe=timeframe, lookback_bars=20)
+
+        # Detect all signals on full dataset (more accurate than per-window detection)
+        all_absorption = detector.detect_absorption(df)
+        all_exhaustion = detector.detect_exhaustion(df)
+        all_delta_unwind = detector.detect_delta_unwind(df)
+
+        # Filter to only signals from recent N bars
+        signal_window_bars = 20
+        recent_cutoff_ts = df.tail(signal_window_bars)["timestamp"].min()
+
+        def filter_recent(signals):
+            """Keep only signals from recent window"""
+            recent = []
+            for s in signals:
+                sig_ts = s.timestamp
+                cutoff = recent_cutoff_ts
+                if hasattr(sig_ts, "timestamp"):
+                    sig_ts = sig_ts.timestamp()
+                if hasattr(cutoff, "timestamp"):
+                    cutoff = cutoff.timestamp()
+                if sig_ts >= cutoff:
+                    recent.append({"direction": s.direction.value, "strength": s.strength})
+            return recent
+
+        abs_dicts = filter_recent(all_absorption)
+        exh_dicts = filter_recent(all_exhaustion)
+        du_dicts = filter_recent(all_delta_unwind)
 
     # Get latest CVD value from the data
     latest = df.tail(1).to_dicts()[0]
-    cvd_value = latest.get("instant_delta")  # CVD is aliased as instant_delta from query
+    cvd_value = latest.get("instant_delta")
+    current_price = latest["close"]
 
-    # Calculate total bias
+    # Calculate total bias with all signal types
     bias_calc = AgentBiasCalculator()
     bias_result = bias_calc.calculate_total_bias(
         df=df,
@@ -220,23 +274,67 @@ def evaluate_bias(state: AgentState) -> AgentState:
         ldr=ldr_metrics.ldr if ldr_metrics else None,
         absorption_signals=abs_dicts,
         cvd=cvd_value,
+        delta_unwind_signals=du_dicts,
+        exhaustion_signals=exh_dicts,
     )
 
+    # ============================================================
+    # Zone Bias Adjustment
+    # ============================================================
+    # Calculate zone proximity bias (uses 15M orderflow for confirmation)
+    zone_bias_result = zone_scorer.calculate_zone_bias(
+        timeframe=timeframe,
+        symbol=symbol,
+        current_price=current_price,
+    )
+
+    # Adjust final score with zone bias
+    # Zone bias is capped at +/- 15 points
+    adjusted_score = bias_result.total_score + zone_bias_result.zone_bias
+    adjusted_score = max(0, min(100, adjusted_score))  # Clamp to 0-100
+
+    # Recalculate mode based on adjusted score
+    from config import get_config
+    config = get_config()
+    thresholds = config.thresholds
+
+    if adjusted_score <= thresholds.high_bearish_max:
+        adjusted_mode = AgentMode.HIGH_BEARISH
+    elif adjusted_score <= thresholds.weak_bearish_max:
+        adjusted_mode = AgentMode.WEAK_BEARISH
+    elif adjusted_score <= thresholds.neutral_max:
+        adjusted_mode = AgentMode.NEUTRAL
+    elif adjusted_score <= thresholds.weak_bullish_max:
+        adjusted_mode = AgentMode.WEAK_BULLISH
+    else:
+        adjusted_mode = AgentMode.HIGH_BULLISH
+
+    # Build evaluation message
     evaluation_msg = (
-        f"Bias Score: {bias_result.total_score:.1f}/100 | Mode: {bias_result.mode.value}\n"
+        f"Bias Score: {adjusted_score:.1f}/100 | Mode: {adjusted_mode.value}\n"
         f"Trend/Structure: {bias_result.trend_structure.score:.1f} | "
         f"Intensity: {bias_result.market_intensity.score:.1f} | "
         f"Orderflow: {bias_result.orderflow_alpha.score:.1f}"
     )
 
+    if zone_bias_result.zone_bias != 0:
+        evaluation_msg += f"\nZone Bias: {zone_bias_result.zone_bias:+.1f} ({zone_bias_result.details})"
+
+    if is_higher_tf:
+        evaluation_msg += f"\n[Using 15M orderflow for {timeframe} zone analysis]"
+
     return {
         **state,
-        "bias_score": bias_result.total_score,
-        "agent_mode": bias_result.mode.value,
+        "bias_score": adjusted_score,
+        "agent_mode": adjusted_mode.value,
         "confidence": bias_result.confidence,
         "trend_score": bias_result.trend_structure.score,
         "intensity_score": bias_result.market_intensity.score,
         "orderflow_score": bias_result.orderflow_alpha.score,
+        "zone_bias": zone_bias_result.zone_bias,
+        "zone_type": zone_bias_result.active_zone.zone_type.value if zone_bias_result.active_zone else None,
+        "zone_quality": zone_bias_result.zone_quality,
+        "zone_confirmed": zone_bias_result.orderflow_confirmation,
         "messages": [{"role": "assistant", "content": evaluation_msg}],
     }
 
@@ -449,6 +547,10 @@ async def run_agent(
         "trend_score": 50,
         "intensity_score": 50,
         "orderflow_score": 50,
+        "zone_bias": None,
+        "zone_type": None,
+        "zone_quality": None,
+        "zone_confirmed": None,
         "position": current_position,
         "entry_price": entry_price,
         "position_size": None,
