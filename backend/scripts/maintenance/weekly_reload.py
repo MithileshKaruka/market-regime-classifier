@@ -5,9 +5,9 @@ Designed to run every Saturday night when markets are closed.
 Downloads fresh data only if the cost is $0 (data already in Databento cache).
 
 Data downloaded:
-- OHLCV-1M: 1 year of price history
-- MBP-1: 3 days of orderflow data (DOM imbalance, quote-inferred delta)
-- Trades: 3 days of trade data (accurate delta, trade flow metrics)
+- OHLCV-1M: 5 years of price history
+- MBP-1: 14 days of orderflow data (DOM imbalance, quote-inferred delta)
+- Trades: 14 days of trade data (accurate delta, trade flow metrics)
 
 Safety features:
 - Backs up database before any changes
@@ -36,9 +36,9 @@ import databento as db
 from config import get_secrets
 
 # Configuration
-OHLCV_YEARS = 1       # 1 year of OHLCV data
-MBP_DAYS = 3          # 3 days of MBP-1 data
-TRADES_DAYS = 3       # 3 days of trades data (for accurate delta/trade flow metrics)
+OHLCV_YEARS = 5       # 5 years of OHLCV data
+MBP_DAYS = 14         # 14 days of MBP-1 data
+TRADES_DAYS = 14      # 14 days of trades data (for accurate delta/trade flow metrics)
 DATASET = "GLBX.MDP3"
 SYMBOL = "MNQ.c.0"    # Continuous front-month contract
 STYPE_IN = "continuous"
