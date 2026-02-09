@@ -72,12 +72,16 @@ interface AgentDecision {
   take_profit: number | null
 }
 
-export default function RegimePanel() {
+interface RegimePanelProps {
+  timeframe: string
+  onTimeframeChange?: (tf: string) => void
+}
+
+export default function RegimePanel({ timeframe, onTimeframeChange }: RegimePanelProps) {
   const [agentBias, setAgentBias] = useState<AgentBias | null>(null)
   const [agentDecision, setAgentDecision] = useState<AgentDecision | null>(null)
   const [recentSignals, setRecentSignals] = useState<OrderflowSignal[]>([])
   const [loading, setLoading] = useState(true)
-  const [selectedTimeframe, setSelectedTimeframe] = useState('15M')
   const lastFetchTimeRef = useRef<number>(0)
 
   const fetchData = useCallback(async () => {
@@ -88,9 +92,9 @@ export default function RegimePanel() {
     try {
       // Fetch Agent Bias Score, Agent Decision, and recent signals in parallel
       const [biasResponse, decisionResponse, signalsResponse] = await Promise.all([
-        fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.agentBias}/${selectedTimeframe}`, { signal: controller.signal }),
-        fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.agentDecision}/${selectedTimeframe}?position=FLAT`, { signal: controller.signal }),
-        fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.orderflowSignals}/${selectedTimeframe}?limit=${THRESHOLDS.signals.fetchLimit}`, { signal: controller.signal })
+        fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.agentBias}/${timeframe}`, { signal: controller.signal }),
+        fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.agentDecision}/${timeframe}?position=FLAT`, { signal: controller.signal }),
+        fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.orderflowSignals}/${timeframe}?limit=${THRESHOLDS.signals.fetchLimit}`, { signal: controller.signal })
       ])
       clearTimeout(timeoutId)
 
@@ -122,7 +126,7 @@ export default function RegimePanel() {
       setRecentSignals(getSampleSignals())
       setLoading(false)
     }
-  }, [selectedTimeframe])
+  }, [timeframe])
 
   // Throttled fetch for bar_update events (don't flood API on every tick)
   const throttledFetch = useCallback(() => {
@@ -134,7 +138,7 @@ export default function RegimePanel() {
 
   // Subscribe to WebSocket - refresh data on bar update (throttled) and bar close
   useWebSocket({
-    timeframe: selectedTimeframe,
+    timeframe,
     symbol: SYMBOL_CONFIG.backendSymbol,
     onBarUpdate: throttledFetch,
     onBarClose: fetchData,
@@ -145,7 +149,7 @@ export default function RegimePanel() {
     // Keep polling as fallback (longer interval since WebSocket handles real-time)
     const interval = setInterval(fetchData, POLLING_INTERVALS.domSignals * 3)
     return () => clearInterval(interval)
-  }, [selectedTimeframe, fetchData])
+  }, [timeframe, fetchData])
 
   if (loading) {
     return (
@@ -193,13 +197,13 @@ export default function RegimePanel() {
     <div className="regime-panel">
       <h3>Agent Bias Score</h3>
 
-      {/* Timeframe Selector */}
+      {/* Timeframe Selector - synced with chart */}
       <div className="timeframe-selector">
         {['5M', '15M', '1H', '4H'].map(tf => (
           <button
             key={tf}
-            className={`tf-btn ${selectedTimeframe === tf ? 'active' : ''}`}
-            onClick={() => setSelectedTimeframe(tf)}
+            className={`tf-btn ${timeframe === tf ? 'active' : ''}`}
+            onClick={() => onTimeframeChange?.(tf)}
           >
             {tf}
           </button>

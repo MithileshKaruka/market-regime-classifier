@@ -47,12 +47,14 @@ LARGE_TRADE_THRESHOLD = 50
 
 def _process_mbp_chunk(df_pl: pl.DataFrame) -> pl.DataFrame:
     """Process MBP-1 data: extract prices and orderflow metrics."""
+    # Note: Databento returns prices already in dollars (e.g., 24760.0), no conversion needed
+    # Cast size columns to Int64 to avoid UInt32 underflow when bid < ask
     return df_pl.with_columns([
         pl.col("ts_event").alias("timestamp"),
-        ((pl.col("bid_px_00") + pl.col("ask_px_00")) / 2 / 1e9).alias("mid_price"),
-        (pl.col("bid_sz_00") - pl.col("ask_sz_00")).alias("delta"),
-        ((pl.col("bid_sz_00") - pl.col("ask_sz_00")) /
-         (pl.col("bid_sz_00") + pl.col("ask_sz_00") + 1)).alias("dom_imbalance"),
+        ((pl.col("bid_px_00") + pl.col("ask_px_00")) / 2).alias("mid_price"),
+        (pl.col("bid_sz_00").cast(pl.Int64) - pl.col("ask_sz_00").cast(pl.Int64)).alias("delta"),
+        ((pl.col("bid_sz_00").cast(pl.Int64) - pl.col("ask_sz_00").cast(pl.Int64)) /
+         (pl.col("bid_sz_00").cast(pl.Int64) + pl.col("ask_sz_00").cast(pl.Int64) + 1)).alias("dom_imbalance"),
         pl.col("bid_sz_00").alias("bid_size"),
         pl.col("ask_sz_00").alias("ask_size"),
     ])

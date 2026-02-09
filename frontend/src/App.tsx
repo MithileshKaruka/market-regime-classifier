@@ -29,7 +29,7 @@ function App() {
         </div>
 
         <div className="regime-container">
-          <RegimePanel />
+          <RegimePanel timeframe={selectedTimeframe} onTimeframeChange={setSelectedTimeframe} />
         </div>
       </main>
     </div>
