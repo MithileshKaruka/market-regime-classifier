@@ -30,6 +30,7 @@ class ScoringConfig:
     trend_structure_weight: int = 20
     market_intensity_weight: int = 20
     orderflow_alpha_weight: int = 60
+    by_timeframe: Optional[Dict] = None  # Timeframe-specific weights: {TF: {trend, intensity, orderflow}}
 
 
 @dataclass

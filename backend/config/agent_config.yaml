@@ -4,26 +4,80 @@
 # =============================================================================
 # BIAS SCORING WEIGHTS (must sum to 100)
 # =============================================================================
+# Backtested 2025-02 with explore_edge_improvements.py on 160 days of data:
+#   5M:  T20/I20/O60 = 52.5% hit, 1.17 PF (current default optimal)
+#   15M: T10/I30/O60 = 50.6% hit, 0.89 PF (best) vs T20/I20/O60 = 48.6%, 0.85 PF
+#   1H:  T10/I30/O60 = 51.6% hit, 1.08 PF (best) vs T20/I20/O60 = 49.0%, 0.87 PF
+#   4H:  T10/I30/O60 = 52.8% hit, 1.13 PF (best) vs T20/I20/O60 = 52.6%, 1.04 PF
 scoring:
-  # Trend & Structure: EMA crossovers, market structure (HH/HL vs LH/LL), S/R levels
+  # Default weights (optimal for 5M)
   trend_structure_weight: 20
-
-  # Market Intensity: RVOL (volume conviction) + VPIN (informed trading)
   market_intensity_weight: 20
-
-  # Orderflow Alpha: OBI, LDR, Absorption, LSF, Delta Unwind, Exhaustion, CVD
   orderflow_alpha_weight: 60
+
+  # Timeframe-specific weights (from explore_edge_improvements.py backtest)
+  by_timeframe:
+    5M:   # Current default is optimal
+      trend: 20
+      intensity: 20
+      orderflow: 60
+    15M:  # Lower trend, boost intensity
+      trend: 10
+      intensity: 30
+      orderflow: 60
+    1H:   # Lower trend, boost intensity
+      trend: 10
+      intensity: 30
+      orderflow: 60
+    4H:   # Lower trend, boost intensity
+      trend: 10
+      intensity: 30
+      orderflow: 60
+    1D:   # Use default
+      trend: 20
+      intensity: 20
+      orderflow: 60
 
 # =============================================================================
 # SCORE THRESHOLDS (0-100 scale)
 # =============================================================================
 thresholds:
-  # Mode boundaries
+  # Mode boundaries - optimized from backtesting
+  # 15M sweep found 52/48 optimal, but keeping slightly wider for robustness
   high_bearish_max: 30      # 0-30 = HIGH_BEARISH (short only)
   weak_bearish_max: 45      # 30-45 = WEAK_BEARISH (exit longs)
   neutral_max: 55           # 45-55 = NEUTRAL (wait)
   weak_bullish_max: 70      # 55-70 = WEAK_BULLISH (cautious longs)
   # 70-100 = HIGH_BULLISH (aggressive longs)
+
+  # Timeframe-specific optimal thresholds (from backtest_indicator_combinations_fast.py)
+  # Note: Bearish signals significantly outperform bullish on 5M (64.7% vs 48.5%)
+  by_timeframe:
+    5M:
+      # Wider thresholds work best: 60/40 = 58.3% hit rate, 1.70 PF
+      bullish: 60
+      bearish: 40
+      high_conviction: 70
+      min_mode_duration: 2
+      prefer_bearish: true  # Bearish signals 64.7% vs bullish 48.5%
+    15M:
+      # Tighter thresholds: 58/42 optimal (1.02 PF)
+      bullish: 58
+      bearish: 42
+      high_conviction: 65
+      min_mode_duration: 2
+    1H:
+      # Trend+Intensity performs best, use standard thresholds
+      bullish: 55
+      bearish: 45
+      high_conviction: 70
+      min_mode_duration: 3
+    4H:
+      # int_zone approach works best at zones
+      bullish: 55
+      bearish: 45
+      high_conviction: 70
+      min_mode_duration: 3
 
 # =============================================================================
 # TREND & STRUCTURE PARAMETERS
@@ -101,6 +155,31 @@ market_intensity:
 
   # POC (Point of Control)
   poc_lookback: 100         # Bars to look back for POC calculation
+
+# =============================================================================
+# ORDERFLOW SCORING APPROACH (Backtested 2025-02)
+# =============================================================================
+# Available approaches:
+#   original    - CVD magnitude in BASE mode (best zone accuracy 31-67%)
+#   signal_req  - Neutral unless primary signal fires (best 5M: 70.6% hit, 4.01 PF)
+#   cvd_dir     - CVD direction only, not magnitude (best 15M hit: 55%)
+#   int_zone    - Boost Intensity weight at zones (best 4H: 56% hit, 47.6% zone acc)
+#   comp_agree  - Require 2+ components to agree
+#   trend_int   - Trend+Intensity only, orderflow neutral in BASE (best 1H: 1.12 PF)
+#
+# Best performing by timeframe (from backtest_agent_bias.py --compare-approaches):
+#   5M:  signal_req (70.6% hit, 4.01 PF) - but requires primary signal to fire
+#   15M: cvd_dir (55.0% hit) or original (best zone accuracy)
+#   1H:  trend_int (49.4% hit, 1.12 PF)
+#   4H:  int_zone (56.0% hit, 47.6% zone accuracy)
+orderflow_approach:
+  default: original
+  by_timeframe:
+    5M: signal_req     # Best hit rate and PF when signals fire
+    15M: original      # Best zone accuracy
+    1H: trend_int      # Orderflow too noisy, let trend/intensity decide
+    4H: int_zone       # Boost intensity at zones
+    1D: original       # Zone accuracy matters most
 
 # =============================================================================
 # ORDERFLOW ALPHA PARAMETERS
@@ -290,6 +369,33 @@ regime:
     dom: 0.6                  # DOM 60%
     cvd: 0.2                  # CVD 20%
     vwap: 0.2                 # VWAP 20%
+
+# =============================================================================
+# ZONE-BASED TRADING CONFIGURATION (Backtested 2025-02)
+# =============================================================================
+# Zone detection parameters moved to zone_bias.py ZONE_PARAMS
+#
+# Key findings from explore_edge_improvements.py (160 days, all TFs):
+#   Zone trading WITHOUT signals outperforms requiring signals!
+#   5M:  52.7% hit, 1.12 PF (8,523 trades)
+#   15M: 52.6% hit, 1.11 PF (6,187 trades)
+#   1H:  56.2% hit, 1.46 PF (4,058 trades) - BEST
+#   4H:  58.6% hit, 1.44 PF (1,149 trades) - EXCELLENT
+#
+# Higher timeframes show better zone prediction accuracy
+zone_trading:
+  # When at a zone, boost Market Intensity weight
+  at_zone_intensity_boost: 1.5   # Multiply intensity contribution by 1.5x at zones
+
+  # Require primary signal for orderflow contribution at zones
+  # DISABLED: Backtesting shows zones work BETTER without requiring signals
+  require_signal_at_zone: false  # Zone direction alone has edge (52-58% hit rate)
+
+  # Zone proximity threshold (% from zone boundary to consider "at zone")
+  zone_proximity_pct: 0.003      # 0.3% from zone edge
+
+  # Zone quality minimum (0-100) - zones below this are ignored
+  min_zone_quality: 40
 
 # =============================================================================
 # SUPPORT/RESISTANCE CONFIGURATION

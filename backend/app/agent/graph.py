@@ -276,6 +276,7 @@ def evaluate_bias(state: AgentState) -> AgentState:
         cvd=cvd_value,
         delta_unwind_signals=du_dicts,
         exhaustion_signals=exh_dicts,
+        timeframe=timeframe,  # Use timeframe-specific weights
     )
 
     # ============================================================

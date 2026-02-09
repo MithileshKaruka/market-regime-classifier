@@ -48,7 +48,9 @@ ZONE_PARAMS = {
     "boring_body_ratio": 0.6,       # Boring candle: body < 60% of range
     "min_base_candles": 1,          # Minimum candles in base
     "max_base_candles": 8,          # Maximum candles in base
-    "min_departure_atr": 0.7,       # ERC must move at least 0.7 ATR
+    "min_departure_atr": 0.3,       # ERC must move at least 0.3 ATR (reduced from 0.7)
+    "zone_extend_candles": 1,       # Extend zone boundaries by ±N candles from swing (reduced from 2)
+    "max_zone_width_atr": 2.5,      # Max zone width in ATR (increased from 2.0)
 }
 
 
@@ -225,6 +227,8 @@ class ZoneBiasScorer:
         min_base = ZONE_PARAMS["min_base_candles"]
         max_base = ZONE_PARAMS["max_base_candles"]
         min_departure = ZONE_PARAMS["min_departure_atr"]
+        zone_extend = ZONE_PARAMS.get("zone_extend_candles", 1)
+        max_zone_width = ZONE_PARAMS.get("max_zone_width_atr", 2.5)
 
         for i in range(scan_start, len(rows)):
             curr = rows[i]
@@ -306,9 +310,9 @@ class ZoneBiasScorer:
                 zone_type = ZoneType.DEMAND
 
                 # Zone boundaries: centered on the swing point (where reversal actually happened)
-                # Include swing candle + 1-2 candles on each side for a tight zone
+                # Include swing candle + N candles on each side for a tight zone
                 extended_base = [swing_low_idx]
-                for offset in [1, 2]:
+                for offset in range(1, zone_extend + 1):
                     if swing_low_idx - offset >= scan_start:
                         extended_base.append(swing_low_idx - offset)
                     if swing_low_idx + offset < i:  # Don't include ERC
@@ -334,9 +338,9 @@ class ZoneBiasScorer:
                 zone_type = ZoneType.SUPPLY
 
                 # Zone boundaries: centered on the swing point (where reversal actually happened)
-                # Include swing candle + 1-2 candles on each side for a tight zone
+                # Include swing candle + N candles on each side for a tight zone
                 extended_base = [swing_high_idx]
-                for offset in [1, 2]:
+                for offset in range(1, zone_extend + 1):
                     if swing_high_idx - offset >= scan_start:
                         extended_base.append(swing_high_idx - offset)
                     if swing_high_idx + offset < i:  # Don't include ERC
@@ -347,9 +351,23 @@ class ZoneBiasScorer:
             zone_low = min(rows[k]["low"] for k in extended_base)
             zone_height = zone_high - zone_low
 
-            # Skip zones that are too wide (> 2x ATR) - filters out huge blocks
-            if zone_height > atr * 2.0:
-                continue
+            # Cap zone height at max_zone_width * ATR to prevent overly wide zones
+            # This is especially important for demand zones at swing lows which tend to be volatile
+            if zone_height > atr * max_zone_width:
+                if zone_type == ZoneType.DEMAND:
+                    # For demand, cap by raising zone_low (keep the swing low as lower bound)
+                    swing_low = rows[swing_low_idx]["low"]
+                    capped_height = atr * max_zone_width
+                    zone_low = swing_low
+                    zone_high = min(zone_high, swing_low + capped_height)
+                else:
+                    # For supply, cap by lowering zone_high (keep the swing high as upper bound)
+                    swing_high = rows[swing_high_idx]["high"]
+                    capped_height = atr * max_zone_width
+                    zone_high = swing_high
+                    zone_low = max(zone_low, swing_high - capped_height)
+
+                zone_height = zone_high - zone_low
 
             # Departure strength (how far ERC moved from zone)
             if zone_type == ZoneType.DEMAND:
@@ -365,14 +383,14 @@ class ZoneBiasScorer:
             leg_score = min(25.0, leg_in_move * 10)
             departure_score = min(25.0, departure * 10)
 
-            # Width score (prefer 0.3-1.5 ATR wide bases)
+            # Width score (prefer 0.3-2.0 ATR wide bases)
             width_ratio = zone_height / atr
-            if 0.3 <= width_ratio <= 1.5:
+            if 0.3 <= width_ratio <= 2.0:
                 width_score = 20.0
             elif width_ratio < 0.3:
                 width_score = width_ratio * 66  # Too narrow
             else:
-                width_score = max(0.0, 20 - (width_ratio - 1.5) * 10)
+                width_score = max(0.0, 20 - (width_ratio - 2.0) * 8)
 
             # Orderflow validation bonus (up to 30 points)
             of_score = self._calc_orderflow_score(rows, base_candles, zone_type)

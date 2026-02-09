@@ -158,8 +158,9 @@ class AgentBiasCalculator:
     def __init__(self):
         # Load configuration
         config = get_config()
+        self._config = config  # Store for timeframe-specific lookups
 
-        # Category weights (from config)
+        # Default category weights (from config)
         self.TREND_STRUCTURE_WEIGHT = config.scoring.trend_structure_weight / 100
         self.MARKET_INTENSITY_WEIGHT = config.scoring.market_intensity_weight / 100
         self.ORDERFLOW_ALPHA_WEIGHT = config.scoring.orderflow_alpha_weight / 100
@@ -180,10 +181,34 @@ class AgentBiasCalculator:
         # Score thresholds
         self.thresholds = config.thresholds
 
-        logger.debug(f"AgentBiasCalculator initialized with weights: "
+        logger.debug(f"AgentBiasCalculator initialized with default weights: "
                     f"Trend={self.TREND_STRUCTURE_WEIGHT}, "
                     f"Intensity={self.MARKET_INTENSITY_WEIGHT}, "
                     f"Orderflow={self.ORDERFLOW_ALPHA_WEIGHT}")
+
+    def get_weights_for_timeframe(self, timeframe: str) -> tuple:
+        """Get component weights for a specific timeframe.
+
+        Returns:
+            tuple: (trend_weight, intensity_weight, orderflow_weight) as decimals (0-1)
+
+        Backtested optimal weights (explore_edge_improvements.py):
+            5M:  T20/I20/O60 = 1.17 PF (default optimal)
+            15M: T10/I30/O60 = 0.89 PF (best)
+            1H:  T10/I30/O60 = 1.08 PF (best)
+            4H:  T10/I30/O60 = 1.13 PF (best)
+        """
+        # Check for timeframe-specific weights in config
+        by_tf = getattr(self._config.scoring, 'by_timeframe', None)
+        if by_tf and timeframe in by_tf:
+            tf_weights = by_tf[timeframe]
+            return (
+                tf_weights.get('trend', self.TREND_STRUCTURE_WEIGHT * 100) / 100,
+                tf_weights.get('intensity', self.MARKET_INTENSITY_WEIGHT * 100) / 100,
+                tf_weights.get('orderflow', self.ORDERFLOW_ALPHA_WEIGHT * 100) / 100,
+            )
+        # Return default weights
+        return (self.TREND_STRUCTURE_WEIGHT, self.MARKET_INTENSITY_WEIGHT, self.ORDERFLOW_ALPHA_WEIGHT)
 
     def calculate_trend_structure_score(
         self,
@@ -712,6 +737,7 @@ class AgentBiasCalculator:
         cvd: Optional[float] = None,
         delta_unwind_signals: Optional[List[Dict]] = None,
         exhaustion_signals: Optional[List[Dict]] = None,
+        timeframe: Optional[str] = None,
     ) -> AgentBiasResult:
         """Calculate total agent bias score (0-100)
 
@@ -768,11 +794,19 @@ class AgentBiasCalculator:
             orderflow_direction=orderflow_direction
         )
 
+        # Get weights (timeframe-specific if available)
+        if timeframe:
+            trend_w, intensity_w, orderflow_w = self.get_weights_for_timeframe(timeframe)
+        else:
+            trend_w = self.TREND_STRUCTURE_WEIGHT
+            intensity_w = self.MARKET_INTENSITY_WEIGHT
+            orderflow_w = self.ORDERFLOW_ALPHA_WEIGHT
+
         # Calculate weighted total
         total_score = (
-            trend_structure.score * self.TREND_STRUCTURE_WEIGHT +
-            market_intensity.score * self.MARKET_INTENSITY_WEIGHT +
-            orderflow_alpha.score * self.ORDERFLOW_ALPHA_WEIGHT
+            trend_structure.score * trend_w +
+            market_intensity.score * intensity_w +
+            orderflow_alpha.score * orderflow_w
         )
 
         # Determine agent mode (using config thresholds)
@@ -805,9 +839,9 @@ class AgentBiasCalculator:
 
         details = (
             f"Score: {total_score:.1f}/100 | Mode: {mode.value}\n"
-            f"Trend/Structure ({self.TREND_STRUCTURE_WEIGHT*100:.0f}%): {trend_structure.score:.1f}\n"
-            f"Market Intensity ({self.MARKET_INTENSITY_WEIGHT*100:.0f}%): {market_intensity.score:.1f}\n"
-            f"Order Flow ({self.ORDERFLOW_ALPHA_WEIGHT*100:.0f}%): {orderflow_alpha.score:.1f}"
+            f"Trend/Structure ({trend_w*100:.0f}%): {trend_structure.score:.1f}\n"
+            f"Market Intensity ({intensity_w*100:.0f}%): {market_intensity.score:.1f}\n"
+            f"Order Flow ({orderflow_w*100:.0f}%): {orderflow_alpha.score:.1f}"
         )
 
         return AgentBiasResult(

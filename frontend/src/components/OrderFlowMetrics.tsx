@@ -31,6 +31,7 @@ interface OrderFlowMetricsProps {
 export default function OrderFlowMetrics({ timeframe }: OrderFlowMetricsProps) {
   const [metrics, setMetrics] = useState<SimplifiedMetrics | null>(null)
   const [loading, setLoading] = useState(true)
+  const [lookbackBars, setLookbackBars] = useState(1)
   const lastFetchTimeRef = useRef<number>(0)
 
   const fetchMetrics = useCallback(async () => {
@@ -39,7 +40,7 @@ export default function OrderFlowMetrics({ timeframe }: OrderFlowMetricsProps) {
     const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
 
     try {
-      const response = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.metrics}`, {
+      const response = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.metrics}?lookback_bars=${lookbackBars}`, {
         signal: controller.signal
       })
       clearTimeout(timeoutId)
@@ -57,7 +58,7 @@ export default function OrderFlowMetrics({ timeframe }: OrderFlowMetricsProps) {
       setMetrics(getSampleMetrics())
       setLoading(false)
     }
-  }, [])
+  }, [lookbackBars])
 
   // Throttled fetch for bar_update events (don't flood API on every tick)
   const throttledFetch = useCallback(() => {
@@ -80,7 +81,7 @@ export default function OrderFlowMetrics({ timeframe }: OrderFlowMetricsProps) {
     // Keep polling as fallback (longer interval since WebSocket handles real-time)
     const interval = setInterval(fetchMetrics, POLLING_INTERVALS.orderflowMetrics * 5)
     return () => clearInterval(interval)
-  }, [timeframe, fetchMetrics])
+  }, [timeframe, fetchMetrics, lookbackBars])
 
   if (loading || !metrics) {
     return (
@@ -100,7 +101,20 @@ export default function OrderFlowMetrics({ timeframe }: OrderFlowMetricsProps) {
 
       {/* DOM Imbalance by Timeframe */}
       <div className="dom-section">
-        <div className="section-label">DOM Imbalance</div>
+        <div className="dom-header">
+          <div className="section-label">DOM Imbalance</div>
+          <div className="lookback-control">
+            <span className="lookback-label">{lookbackBars} bar{lookbackBars > 1 ? 's' : ''}</span>
+            <input
+              type="range"
+              min="1"
+              max="20"
+              value={lookbackBars}
+              onChange={(e) => setLookbackBars(parseInt(e.target.value))}
+              className="lookback-slider"
+            />
+          </div>
+        </div>
         <div className="dom-grid">
           {metrics.dom_by_timeframe.map((dom) => {
             const domColor = dom.direction === 'BULLISH' ? COLORS.bullish : dom.direction === 'BEARISH' ? COLORS.bearish : COLORS.neutral

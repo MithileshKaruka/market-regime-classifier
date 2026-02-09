@@ -723,7 +723,7 @@ class AgentBiasBacktester:
                         du_dicts.extend(delta_unwind_by_bar.get(j, []))
                         exh_dicts.extend(exhaustion_by_bar.get(j, []))
 
-                # Calculate bias
+                # Calculate bias with timeframe-specific weights
                 bias_result = self.bias_calculator.calculate_total_bias(
                     df=lookback_df,
                     sr_levels=None,
@@ -735,6 +735,7 @@ class AgentBiasBacktester:
                     delta_unwind_signals=du_dicts,
                     exhaustion_signals=exh_dicts,
                     cvd=cvd,
+                    timeframe=timeframe,  # Use timeframe-specific weights
                 )
 
                 # ============================================================

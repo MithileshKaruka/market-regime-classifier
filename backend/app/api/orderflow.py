@@ -238,37 +238,50 @@ async def get_orderflow_signals(
 
 
 @router.get("/metrics", response_model=SimplifiedMetrics)
-async def get_simplified_metrics():
+async def get_simplified_metrics(
+    lookback_bars: int = Query(1, ge=1, le=20, description="Number of bars to average for DOM imbalance"),
+):
     """
     Get simplified orderflow metrics
 
     Returns:
     - DOM imbalance for each timeframe (5M, 15M, 1H, 4H, 1D)
     - Daily VWAP level with current price position (above/below)
+
+    Args:
+        lookback_bars: Number of recent bars to average for DOM imbalance (1-20, default 1)
     """
     with DuckDBStorage() as storage:
         timeframes = ['5M', '15M', '1H', '4H', '1D']
         dom_summaries = []
 
         for tf in timeframes:
-            # Get latest DOM imbalance for each timeframe
+            # Get latest N bars for DOM imbalance averaging
             # Filter out spurious low-volume bars (volume > 100)
             df = storage.conn.execute(f"""
                 SELECT timestamp, dom_imbalance
                 FROM ohlcv_ticks
                 WHERE symbol = 'MNQ' AND timeframe = '{tf}'
                   AND volume > 100
+                  AND dom_imbalance IS NOT NULL
                 ORDER BY timestamp DESC
-                LIMIT 1
+                LIMIT {lookback_bars}
             """).pl()
 
             if len(df) > 0:
-                row = df.row(0, named=True)
-                dom = row["dom_imbalance"]
+                # Average DOM imbalance over the lookback period
+                dom_values = [
+                    row["dom_imbalance"]
+                    for row in df.to_dicts()
+                    if row["dom_imbalance"] is not None
+                       and not (isinstance(row["dom_imbalance"], float) and row["dom_imbalance"] != row["dom_imbalance"])
+                ]
 
-                # Skip if dom_imbalance is null or NaN
-                if dom is None or (isinstance(dom, float) and dom != dom):
+                if not dom_values:
                     continue
+
+                dom = sum(dom_values) / len(dom_values)
+                latest_ts = df.row(0, named=True)["timestamp"]
 
                 # Classify direction using config threshold
                 config = get_config()
@@ -284,7 +297,7 @@ async def get_simplified_metrics():
                     timeframe=tf,
                     dom_imbalance=dom,
                     direction=direction,
-                    timestamp=row["timestamp"],
+                    timestamp=latest_ts,
                 ))
 
         # Calculate daily VWAP from intraday bars (15M for precision)
@@ -638,7 +651,7 @@ async def get_agent_bias(
         except Exception:
             pass  # S/R table might not exist
 
-        # Calculate agent bias
+        # Calculate agent bias with timeframe-specific weights
         bias_calc = AgentBiasCalculator()
         bias_result = bias_calc.calculate_total_bias(
             df=df,
@@ -650,6 +663,7 @@ async def get_agent_bias(
             absorption_signals=abs_dicts,
             delta_unwind_signals=du_dicts,
             exhaustion_signals=exh_dicts,
+            timeframe=timeframe,  # Use timeframe-specific weights
         )
 
         return AgentBiasResponse(
