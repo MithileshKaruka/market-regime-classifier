@@ -32,6 +32,8 @@ export default function OrderFlowMetrics({ timeframe }: OrderFlowMetricsProps) {
   const [metrics, setMetrics] = useState<SimplifiedMetrics | null>(null)
   const [loading, setLoading] = useState(true)
   const [lookbackBars, setLookbackBars] = useState(1)
+  const [lastUpdateTime, setLastUpdateTime] = useState<number>(0)
+  const [elapsedSeconds, setElapsedSeconds] = useState<number>(0)
   const lastFetchTimeRef = useRef<number>(0)
 
   const fetchMetrics = useCallback(async () => {
@@ -46,6 +48,7 @@ export default function OrderFlowMetrics({ timeframe }: OrderFlowMetricsProps) {
       clearTimeout(timeoutId)
       const data = await response.json()
       setMetrics(data)
+      setLastUpdateTime(Date.now())
       setLoading(false)
     } catch (error) {
       clearTimeout(timeoutId)
@@ -83,6 +86,15 @@ export default function OrderFlowMetrics({ timeframe }: OrderFlowMetricsProps) {
     return () => clearInterval(interval)
   }, [timeframe, fetchMetrics, lookbackBars])
 
+  // Update elapsed seconds every second
+  useEffect(() => {
+    if (lastUpdateTime === 0) return
+    const interval = setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - lastUpdateTime) / 1000))
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [lastUpdateTime])
+
   if (loading || !metrics) {
     return (
       <div className="orderflow-metrics">
@@ -97,7 +109,10 @@ export default function OrderFlowMetrics({ timeframe }: OrderFlowMetricsProps) {
 
   return (
     <div className="orderflow-metrics">
-      <h3>{LABELS.panels.orderFlow}</h3>
+      <div className="panel-header">
+        <h3>{LABELS.panels.orderFlow}</h3>
+        {lastUpdateTime > 0 && <span className="last-updated">{elapsedSeconds}s</span>}
+      </div>
 
       {/* DOM Imbalance by Timeframe */}
       <div className="dom-section">

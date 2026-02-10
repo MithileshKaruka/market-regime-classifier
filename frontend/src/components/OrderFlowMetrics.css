@@ -4,6 +4,18 @@
   gap: 1.5rem;
 }
 
+.orderflow-metrics .panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.orderflow-metrics .last-updated {
+  font-size: 0.6875rem;
+  color: #6b7280;
+  font-variant-numeric: tabular-nums;
+}
+
 .orderflow-metrics h3 {
   margin: 0;
   font-size: 1.125rem;

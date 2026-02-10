@@ -62,15 +62,16 @@ class ZonePaneRenderer implements ISeriesPrimitivePaneRenderer {
       // Zone styling based on status
       const isHeld = status === 'HELD'
       const isBroken = status === 'BROKEN'
+      const isReclaimed = status === 'RECLAIMED'
 
-      // Broken zones are very faded, held zones are stronger, untested in between
-      // Using lighter colors for less visual clutter
+      // Broken zones are very faded, held/reclaimed zones are stronger, untested in between
+      // Reclaimed = was broken but price came back, now acting as zone again
       let fillColor: string
       if (isBroken) {
         fillColor = isDemand
           ? 'rgba(34, 197, 94, 0.04)'   // Very faded green
           : 'rgba(239, 68, 68, 0.04)'    // Very faded red
-      } else if (isHeld) {
+      } else if (isHeld || isReclaimed) {
         fillColor = isDemand
           ? 'rgba(34, 197, 94, 0.15)'   // Light green
           : 'rgba(239, 68, 68, 0.15)'    // Light red
@@ -88,10 +89,13 @@ class ZonePaneRenderer implements ISeriesPrimitivePaneRenderer {
       ctx.strokeStyle = isDemand ? COLORS.zones.demand : COLORS.zones.supply
       ctx.lineWidth = isBroken ? 0.5 : 1
 
-      // Broken zones get dashed lines, active zones slightly transparent
+      // Broken zones get dashed lines, reclaimed get dotted, active solid
       if (isBroken) {
         ctx.setLineDash([4, 4])
         ctx.globalAlpha = 0.3
+      } else if (isReclaimed) {
+        ctx.setLineDash([2, 2])  // Shorter dash for reclaimed
+        ctx.globalAlpha = 0.7
       } else {
         ctx.globalAlpha = 0.6
       }

@@ -5,6 +5,18 @@
   height: 100%;
 }
 
+.regime-panel .panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.regime-panel .last-updated {
+  font-size: 0.6875rem;
+  color: #6b7280;
+  font-variant-numeric: tabular-nums;
+}
+
 .regime-panel h3,
 .regime-panel h4 {
   margin: 0;

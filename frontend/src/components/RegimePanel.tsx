@@ -8,6 +8,7 @@ import {
   LABELS,
   SYMBOL_CONFIG,
   getDirectionIcon,
+  type Timeframe,
 } from '../config'
 import { useWebSocket } from '../hooks/useWebSocket'
 
@@ -74,7 +75,7 @@ interface AgentDecision {
 
 interface RegimePanelProps {
   timeframe: string
-  onTimeframeChange?: (tf: string) => void
+  onTimeframeChange?: (tf: Timeframe) => void
 }
 
 export default function RegimePanel({ timeframe, onTimeframeChange }: RegimePanelProps) {
@@ -82,6 +83,8 @@ export default function RegimePanel({ timeframe, onTimeframeChange }: RegimePane
   const [agentDecision, setAgentDecision] = useState<AgentDecision | null>(null)
   const [recentSignals, setRecentSignals] = useState<OrderflowSignal[]>([])
   const [loading, setLoading] = useState(true)
+  const [lastUpdateTime, setLastUpdateTime] = useState<number>(0)
+  const [elapsedSeconds, setElapsedSeconds] = useState<number>(0)
   const lastFetchTimeRef = useRef<number>(0)
 
   const fetchData = useCallback(async () => {
@@ -114,6 +117,7 @@ export default function RegimePanel({ timeframe, onTimeframeChange }: RegimePane
         setRecentSignals(recent)
       }
 
+      setLastUpdateTime(Date.now())
       setLoading(false)
     } catch (error) {
       clearTimeout(timeoutId)
@@ -150,6 +154,15 @@ export default function RegimePanel({ timeframe, onTimeframeChange }: RegimePane
     const interval = setInterval(fetchData, POLLING_INTERVALS.domSignals * 3)
     return () => clearInterval(interval)
   }, [timeframe, fetchData])
+
+  // Update elapsed seconds every second
+  useEffect(() => {
+    if (lastUpdateTime === 0) return
+    const interval = setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - lastUpdateTime) / 1000))
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [lastUpdateTime])
 
   if (loading) {
     return (
@@ -195,7 +208,10 @@ export default function RegimePanel({ timeframe, onTimeframeChange }: RegimePane
 
   return (
     <div className="regime-panel">
-      <h3>Agent Bias Score</h3>
+      <div className="panel-header">
+        <h3>Agent Bias Score</h3>
+        {lastUpdateTime > 0 && <span className="last-updated">{elapsedSeconds}s</span>}
+      </div>
 
       {/* Timeframe Selector - synced with chart */}
       <div className="timeframe-selector">
@@ -203,7 +219,7 @@ export default function RegimePanel({ timeframe, onTimeframeChange }: RegimePane
           <button
             key={tf}
             className={`tf-btn ${timeframe === tf ? 'active' : ''}`}
-            onClick={() => onTimeframeChange?.(tf)}
+            onClick={() => onTimeframeChange?.(tf as Timeframe)}
           >
             {tf}
           </button>

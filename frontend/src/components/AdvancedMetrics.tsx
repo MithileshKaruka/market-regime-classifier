@@ -66,6 +66,8 @@ export default function AdvancedMetricsPanel({ timeframe }: AdvancedMetricsProps
   const [metrics, setMetrics] = useState<AdvancedMetrics | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [lastUpdateTime, setLastUpdateTime] = useState<number>(0)
+  const [elapsedSeconds, setElapsedSeconds] = useState<number>(0)
   const lastFetchTimeRef = useRef<number>(0)
 
   const fetchMetrics = useCallback(async () => {
@@ -83,6 +85,7 @@ export default function AdvancedMetricsPanel({ timeframe }: AdvancedMetricsProps
       }
       const data = await response.json()
       setMetrics(data)
+      setLastUpdateTime(Date.now())
       setError(null)
       setLoading(false)
     } catch (err) {
@@ -120,6 +123,15 @@ export default function AdvancedMetricsPanel({ timeframe }: AdvancedMetricsProps
     return () => clearInterval(interval)
   }, [timeframe, fetchMetrics])
 
+  // Update elapsed seconds every second
+  useEffect(() => {
+    if (lastUpdateTime === 0) return
+    const interval = setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - lastUpdateTime) / 1000))
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [lastUpdateTime])
+
   const getConvictionBadge = (conviction: string) => {
     const colors: Record<string, string> = {
       HIGH: COLORS.bullish,
@@ -154,7 +166,10 @@ export default function AdvancedMetricsPanel({ timeframe }: AdvancedMetricsProps
   return (
     <div className="advanced-metrics">
       <div className="metrics-header">
-        <h3>Advanced Orderflow</h3>
+        <div className="title-group">
+          <h3>Advanced Orderflow</h3>
+          {lastUpdateTime > 0 && <span className="last-updated">{elapsedSeconds}s</span>}
+        </div>
         <div className="header-badges">
           <span
             className="bias-badge"

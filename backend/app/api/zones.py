@@ -11,13 +11,18 @@ from app.features.zone_bias import ZoneBiasScorer, ZoneType, ActiveZone
 router = APIRouter()
 
 
-def check_zone_status(zone: ActiveZone, df: pl.DataFrame) -> Tuple[str, int]:
+def check_zone_status(zone: ActiveZone, df: pl.DataFrame, break_pct: float = 0.002) -> Tuple[str, int]:
     """Check if a zone has been tested and whether it held or broke.
 
     Zone breaking rules:
-    - Demand zone: broken when price CLOSES below zone low
-    - Supply zone: broken when price CLOSES above zone high
-    - A wick through that closes back inside is NOT broken (reclaimed)
+    - Demand zone: broken when price CLOSES below zone low by break_pct
+    - Supply zone: broken when price CLOSES above zone high by break_pct
+    - Uses percentage-based threshold (default 0.2%) to filter noise
+
+    Args:
+        zone: The zone to check
+        df: Price data DataFrame
+        break_pct: Percentage threshold for zone break (default 0.2%)
 
     Returns:
         Tuple of (status, times_tested)
@@ -26,10 +31,12 @@ def check_zone_status(zone: ActiveZone, df: pl.DataFrame) -> Tuple[str, int]:
     rows = df.to_dicts()
     formed_idx = zone.formed_bar_idx
 
-    # Break buffer: zone is broken if price closes past the boundary + buffer
-    # Use 30% of zone height - tighter threshold so repeatedly tested zones break
-    zone_height = zone.price_high - zone.price_low
-    break_buffer = zone_height * 0.3
+    # Break threshold: use percentage of zone boundary price
+    # e.g., 0.2% of 25500 = 51 points - price must close 51+ points beyond
+    if zone.zone_type == ZoneType.SUPPLY:
+        break_threshold = zone.price_high * break_pct
+    else:
+        break_threshold = zone.price_low * break_pct
 
     # Scan all bars after zone formation
     times_tested = 0
@@ -49,18 +56,16 @@ def check_zone_status(zone: ActiveZone, df: pl.DataFrame) -> Tuple[str, int]:
             was_tested = True
             times_tested += 1
 
-        # Check if zone is broken - by CLOSE with buffer
-        # Zone must be decisively broken, not just touched through
-        if zone.zone_type == ZoneType.DEMAND:
-            # Demand zone broken if price closes significantly below zone low
-            if bar_close < zone.price_low - break_buffer:
-                is_broken = True
-                break
-        else:  # SUPPLY
-            # Supply zone broken if price closes significantly above zone high
-            if bar_close > zone.price_high + break_buffer:
-                is_broken = True
-                break
+        # Check if zone is broken - by CLOSE beyond threshold
+        if not is_broken:
+            if zone.zone_type == ZoneType.DEMAND:
+                # Demand broken if close is break_pct below zone low
+                if bar_close < zone.price_low - break_threshold:
+                    is_broken = True
+            else:  # SUPPLY
+                # Supply broken if close is break_pct above zone high
+                if bar_close > zone.price_high + break_threshold:
+                    is_broken = True
 
     if is_broken:
         return "BROKEN", times_tested
@@ -140,7 +145,8 @@ async def get_zones(
         with DuckDBStorage() as storage:
             df = storage.conn.execute(f"""
                 SELECT * FROM (
-                    SELECT timestamp, open, high, low, close, volume
+                    SELECT timestamp, open, high, low, close, volume,
+                           dom_imbalance, cvd, instant_delta, trade_flow_ratio
                     FROM ohlcv_ticks
                     WHERE symbol = '{symbol}' AND timeframe = '{timeframe}'
                     ORDER BY timestamp DESC

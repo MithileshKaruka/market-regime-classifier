@@ -53,8 +53,9 @@ def _process_mbp_chunk(df_pl: pl.DataFrame) -> pl.DataFrame:
         pl.col("ts_event").alias("timestamp"),
         ((pl.col("bid_px_00") + pl.col("ask_px_00")) / 2).alias("mid_price"),
         (pl.col("bid_sz_00").cast(pl.Int64) - pl.col("ask_sz_00").cast(pl.Int64)).alias("delta"),
-        ((pl.col("bid_sz_00").cast(pl.Int64) - pl.col("ask_sz_00").cast(pl.Int64)) /
-         (pl.col("bid_sz_00").cast(pl.Int64) + pl.col("ask_sz_00").cast(pl.Int64) + 1)).alias("dom_imbalance"),
+        # DOM imbalance: 0-1 range where 0.5 = balanced, >0.5 = bid heavy (bullish), <0.5 = ask heavy (bearish)
+        (pl.col("bid_sz_00").cast(pl.Float64) /
+         (pl.col("bid_sz_00").cast(pl.Float64) + pl.col("ask_sz_00").cast(pl.Float64) + 1)).alias("dom_imbalance"),
         pl.col("bid_sz_00").alias("bid_size"),
         pl.col("ask_sz_00").alias("ask_size"),
     ])
