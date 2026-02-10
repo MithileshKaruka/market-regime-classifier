@@ -167,18 +167,18 @@ market_intensity:
 #   comp_agree  - Require 2+ components to agree
 #   trend_int   - Trend+Intensity only, orderflow neutral in BASE (best 1H: 1.12 PF)
 #
-# Best performing by timeframe (from backtest_agent_bias.py --compare-approaches):
-#   5M:  signal_req (70.6% hit, 4.01 PF) - but requires primary signal to fire
-#   15M: cvd_dir (55.0% hit) or original (best zone accuracy)
-#   1H:  trend_int (49.4% hit, 1.12 PF)
-#   4H:  int_zone (56.0% hit, 47.6% zone accuracy)
+# Best performing by timeframe (from backtest_agent_bias.py --compare-approaches 2026-02-10):
+#   5M:  signal_req (65.2% hit, 2.24 PF) - requires primary signal to fire
+#   15M: int_zone (59.1% hit, 2.15 PF) - boost intensity at zones
+#   1H:  trend_int (48.7% hit, 1.06 PF) - orderflow neutral in BASE
+#   4H:  signal_req (54.5% hit, 1.19 PF) - requires primary signal
 orderflow_approach:
   default: original
   by_timeframe:
     5M: signal_req     # Best hit rate and PF when signals fire
-    15M: original      # Best zone accuracy
+    15M: int_zone      # Best hit rate (59.1%) and PF (2.15)
     1H: trend_int      # Orderflow too noisy, let trend/intensity decide
-    4H: int_zone       # Boost intensity at zones
+    4H: signal_req     # Best hit rate (54.5%) and PF (1.19)
     1D: original       # Zone accuracy matters most
 
 # =============================================================================
