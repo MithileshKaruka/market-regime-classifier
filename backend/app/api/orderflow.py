@@ -722,6 +722,12 @@ class AgentDecisionResponse(BaseModel):
     intensity_score: float
     orderflow_score: float
 
+    # Zone info (when price is inside a S/D zone)
+    zone_bias: Optional[float] = None
+    zone_type: Optional[str] = None  # "DEMAND" or "SUPPLY"
+    zone_quality: Optional[float] = None
+    zone_confirmed: Optional[bool] = None
+
     # Position info
     position: str
     entry_price: Optional[float] = None
@@ -792,6 +798,10 @@ async def run_trading_agent(
             trend_score=result.get("trend_score", 50),
             intensity_score=result.get("intensity_score", 50),
             orderflow_score=result.get("orderflow_score", 50),
+            zone_bias=result.get("zone_bias"),
+            zone_type=result.get("zone_type"),
+            zone_quality=result.get("zone_quality"),
+            zone_confirmed=result.get("zone_confirmed"),
             position=result.get("position", "FLAT"),
             entry_price=result.get("entry_price"),
             action=result.get("action", "WAIT"),
