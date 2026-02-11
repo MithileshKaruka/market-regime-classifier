@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import regime, features, health, chart_v2, orderflow, websocket, admin, zones
+from app.api import regime, features, health, chart_v2, orderflow, websocket, admin, zones, key_levels
 
 # Configure logging
 logging.basicConfig(
@@ -111,6 +111,7 @@ app.include_router(orderflow.router, prefix="/api/orderflow", tags=["orderflow"]
 app.include_router(websocket.router, prefix="/ws", tags=["websocket"])
 app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
 app.include_router(zones.router, prefix="/api/v1", tags=["zones"])
+app.include_router(key_levels.router, prefix="/api/v1", tags=["key-levels"])
 
 
 @app.get("/")
