@@ -82,11 +82,22 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
 
       if (agentRes.ok) {
         const agentData = await agentRes.json()
+        console.log('[AgentPanel] Agent decision response:', {
+          bias_score: agentData.bias_score,
+          agent_mode: agentData.agent_mode,
+          zone_bias: agentData.zone_bias,
+          zone_type: agentData.zone_type,
+          action: agentData.action,
+        })
         setDecision(agentData)
       }
 
       if (!biasRes.ok) throw new Error('Failed to fetch bias score')
       const data = await biasRes.json()
+      console.log('[AgentPanel] Bias details response:', {
+        total_score: data.total_score,
+        mode: data.mode,
+      })
       setBiasDetails(data)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error')
