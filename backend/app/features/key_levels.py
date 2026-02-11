@@ -91,16 +91,11 @@ class KeyLevelsCalculator:
         return first_sunday_session
 
     def _get_cme_year_start(self, dt: datetime) -> datetime:
-        """Get CME year start (first Sunday 23:00 UTC of the year)."""
-        jan_first = dt.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        """Get CME year start (January 1st 00:00 UTC).
 
-        # Find first Sunday at or after Jan 1
-        days_until_sunday = (6 - jan_first.weekday()) % 7
-        if days_until_sunday == 0 and jan_first.weekday() != 6:
-            days_until_sunday = 7
-
-        first_sunday = jan_first + timedelta(days=days_until_sunday)
-        return first_sunday.replace(hour=self.CME_SESSION_HOUR, minute=0, second=0, microsecond=0)
+        Returns Jan 1 00:00 - the first bar on or after this is the yearly open.
+        """
+        return dt.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
 
     def _get_monday_bounds(self, dt: datetime) -> tuple[datetime, datetime]:
         """Get Monday session bounds (Sunday 23:00 UTC to Monday 22:00 UTC).
