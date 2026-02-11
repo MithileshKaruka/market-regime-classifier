@@ -724,7 +724,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
               color: level.color,
               lineWidth: 1,
               lineStyle: 2,  // Dashed line
-              axisLabelVisible: false,  // Don't show price on axis
+              axisLabelVisible: true,
               title: level.short_name,
             })
             if (line) keyLevelLinesRef.current.push(line)
@@ -810,7 +810,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
           color: level.color,
           lineWidth: 1,
           lineStyle: 2,  // Dashed line
-          axisLabelVisible: false,  // Don't show price on axis
+          axisLabelVisible: true,
           title: level.short_name,
         })
         if (line) keyLevelLinesRef.current.push(line)
