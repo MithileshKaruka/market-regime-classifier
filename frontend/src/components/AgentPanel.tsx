@@ -19,6 +19,11 @@ interface AgentDecision {
   bias_score: number
   agent_mode: string
   confidence: string
+  // Zone info
+  zone_bias: number | null
+  zone_type: string | null  // "DEMAND" or "SUPPLY"
+  zone_quality: number | null
+  zone_confirmed: boolean | null
 }
 
 interface BiasDetails {
@@ -155,6 +160,35 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
               {decision?.confidence || biasDetails.confidence}
             </div>
           </div>
+
+          {/* Zone Entry Indicator - Shows when price is inside a S/D zone */}
+          {decision?.zone_bias !== null && decision?.zone_bias !== 0 && decision?.zone_type && (
+            <div
+              className="zone-indicator"
+              style={{
+                marginTop: '8px',
+                padding: '6px 10px',
+                borderRadius: '6px',
+                backgroundColor: decision.zone_type === 'DEMAND' ? COLORS.zones.demandBg : COLORS.zones.supplyBg,
+                border: `1px solid ${decision.zone_type === 'DEMAND' ? COLORS.zones.demand : COLORS.zones.supply}`,
+                fontSize: '11px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '8px',
+              }}
+            >
+              <span style={{
+                fontWeight: 600,
+                color: decision.zone_type === 'DEMAND' ? COLORS.zones.demand : COLORS.zones.supply
+              }}>
+                {decision.zone_type === 'DEMAND' ? '▲' : '▼'} In {decision.zone_type} Zone
+              </span>
+              <span style={{ color: COLORS.text.secondary }}>
+                Q:{decision.zone_quality?.toFixed(0) || '?'} | {decision.zone_confirmed ? '✓ Confirmed' : 'Unconfirmed'} | {decision.zone_bias > 0 ? '+' : ''}{decision.zone_bias?.toFixed(1)} pts
+              </span>
+            </div>
+          )}
 
           {/* Action Card with SL/TP */}
           {decision && (
