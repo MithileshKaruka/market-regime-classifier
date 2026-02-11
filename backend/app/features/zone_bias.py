@@ -689,10 +689,11 @@ class ZoneBiasScorer:
                 details="No active zones near current price",
             )
 
-        # Check if price is at/near zone
-        is_at_zone = distance_pct <= self.entry_buffer_pct
+        # Check if price is INSIDE the zone (not just near it)
+        # Bias only applies when price enters the zone, not when approaching
+        is_inside_zone = distance_pct == 0.0
 
-        if not is_at_zone:
+        if not is_inside_zone:
             return ZoneBiasResult(
                 zone_bias=0.0,
                 active_zone=zone,
@@ -703,7 +704,7 @@ class ZoneBiasScorer:
                 details=f"Price {distance_pct:.2%} from {zone.zone_type.value} zone (quality {quality:.0f})",
             )
 
-        # Price is at zone - get 15M orderflow signals for confirmation
+        # Price is INSIDE zone - get 15M orderflow signals for confirmation
         df_15m = self.load_15m_orderflow_data(symbol)
         abs_signals, exh_signals, du_signals = self.get_recent_orderflow_signals(df_15m)
 
