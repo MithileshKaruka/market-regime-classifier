@@ -250,12 +250,17 @@ class LiveDataIngestion:
             return ts.replace(minute=0, second=0, microsecond=0)
         elif timeframe == "4H":
             # Align to CME session boundaries (18:00 ET = 23:00 UTC)
+            # 4H bars: 23:00-03:00, 03:00-07:00, 07:00-11:00, 11:00-15:00, 15:00-19:00, 19:00-23:00
             # Shift by 1 hour so 23:00 UTC -> 00:00, bucket, then shift back
             shifted_hour = (ts.hour + 1) % 24
             bucket_hour = (shifted_hour // 4) * 4
             # Shift back: subtract 1 hour from bucket
             actual_hour = (bucket_hour - 1) % 24
-            return ts.replace(hour=actual_hour, minute=0, second=0, microsecond=0)
+            result = ts.replace(hour=actual_hour, minute=0, second=0, microsecond=0)
+            # If bar hour is 23 but current hour is < 23, the bar belongs to previous day
+            if actual_hour == 23 and ts.hour < 23:
+                result = result - timedelta(days=1)
+            return result
         elif timeframe == "1D":
             # Align to CME session start (18:00 ET = 23:00 UTC)
             # Daily bar starts at 23:00 UTC previous day
