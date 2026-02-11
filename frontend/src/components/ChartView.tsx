@@ -98,7 +98,7 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
   const [showZones, setShowZones] = useState(false)
   const [zones, setZones] = useState<ZoneData[]>([])
   const zonePrimitivesRef = useRef<ZonePrimitive[]>([])  // Track zone primitives
-  const [showKeyLevels, setShowKeyLevels] = useState(true)
+  const [showKeyLevels, setShowKeyLevels] = useState(false)
   const [keyLevels, setKeyLevels] = useState<KeyLevel[]>([])
   const keyLevelLinesRef = useRef<any[]>([])  // Track key level price lines
   const chartViewRef = useRef<HTMLDivElement>(null)
@@ -723,8 +723,8 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
               price: level.price,
               color: level.color,
               lineWidth: 1,
-              lineStyle: 0,  // Solid line for key levels
-              axisLabelVisible: true,
+              lineStyle: 2,  // Dashed line
+              axisLabelVisible: false,  // Don't show price on axis
               title: level.short_name,
             })
             if (line) keyLevelLinesRef.current.push(line)
@@ -809,8 +809,8 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
           price: level.price,
           color: level.color,
           lineWidth: 1,
-          lineStyle: 0,  // Solid line
-          axisLabelVisible: true,
+          lineStyle: 2,  // Dashed line
+          axisLabelVisible: false,  // Don't show price on axis
           title: level.short_name,
         })
         if (line) keyLevelLinesRef.current.push(line)
