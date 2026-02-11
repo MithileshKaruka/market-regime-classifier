@@ -71,6 +71,7 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
   const [showReasoning, setShowReasoning] = useState(false)
 
   const fetchBiasScore = async () => {
+    console.log('[AgentPanel] fetchBiasScore called for timeframe:', timeframe)
     setLoading(true)
     setError(null)
     try {
@@ -125,7 +126,7 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
   return (
     <div className="agent-panel">
       <div className="agent-header">
-        <h3>Market Bias</h3>
+        <h3>Agent Bias</h3>
         <button
           onClick={fetchBiasScore}
           className="refresh-btn"
@@ -133,6 +134,11 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
         >
           {loading ? '...' : 'Refresh'}
         </button>
+      </div>
+
+      {/* DEBUG: Remove after testing */}
+      <div style={{ fontSize: '10px', background: '#333', padding: '4px', marginBottom: '8px' }}>
+        DEBUG: decision?.bias_score = {String(decision?.bias_score)} | biasDetails?.total_score = {String(biasDetails?.total_score)}
       </div>
 
       {biasDetails && (

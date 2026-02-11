@@ -71,6 +71,15 @@ interface AgentDecision {
   action_reason: string
   stop_loss: number | null
   take_profit: number | null
+  // Scores from /agent endpoint (includes zone adjustment)
+  bias_score: number
+  agent_mode: string
+  confidence: string
+  // Zone info (when price is inside a S/D zone)
+  zone_bias: number | null
+  zone_type: string | null  // "DEMAND" or "SUPPLY"
+  zone_quality: number | null
+  zone_confirmed: boolean | null
 }
 
 interface RegimePanelProps {
@@ -228,10 +237,10 @@ export default function RegimePanel({ timeframe, onTimeframeChange }: RegimePane
 
       {agentBias && (
         <>
-          {/* Main Score Display */}
+          {/* Main Score Display - Use decision score (includes zone adjustment) for consistency with action */}
           <div className="score-display">
-            <div className="score-value" style={{ color: getModeColor(agentBias.mode) }}>
-              {agentBias.total_score.toFixed(0)}
+            <div className="score-value" style={{ color: getModeColor(agentDecision?.agent_mode || agentBias.mode) }}>
+              {(agentDecision?.bias_score ?? agentBias.total_score).toFixed(0)}
             </div>
             <div className="score-label">/ 100</div>
           </div>
@@ -242,8 +251,8 @@ export default function RegimePanel({ timeframe, onTimeframeChange }: RegimePane
               <div
                 className="score-bar-fill"
                 style={{
-                  width: getScoreBarWidth(agentBias.total_score),
-                  backgroundColor: getModeColor(agentBias.mode)
+                  width: getScoreBarWidth(agentDecision?.bias_score ?? agentBias.total_score),
+                  backgroundColor: getModeColor(agentDecision?.agent_mode || agentBias.mode)
                 }}
               />
               <div className="score-bar-markers">
@@ -255,19 +264,43 @@ export default function RegimePanel({ timeframe, onTimeframeChange }: RegimePane
             </div>
           </div>
 
-          {/* Mode & Recommendation */}
+          {/* Mode & Recommendation - Use decision values for consistency with action */}
           <div className="mode-display">
-            <span className="mode-icon">{getModeIcon(agentBias.mode)}</span>
-            <span className="mode-text" style={{ color: getModeColor(agentBias.mode) }}>
-              {agentBias.mode.replace('_', ' ')}
+            <span className="mode-icon">{getModeIcon(agentDecision?.agent_mode || agentBias.mode)}</span>
+            <span className="mode-text" style={{ color: getModeColor(agentDecision?.agent_mode || agentBias.mode) }}>
+              {(agentDecision?.agent_mode || agentBias.mode).replace('_', ' ')}
             </span>
             <span
               className="confidence-badge"
-              style={{ backgroundColor: getConfidenceColor(agentBias.confidence) }}
+              style={{ backgroundColor: getConfidenceColor(agentDecision?.confidence || agentBias.confidence) }}
             >
-              {agentBias.confidence}
+              {agentDecision?.confidence || agentBias.confidence}
             </span>
           </div>
+
+          {/* Zone Entry Indicator - Shows when price is inside a S/D zone */}
+          {agentDecision?.zone_bias != null && agentDecision.zone_bias !== 0 && agentDecision.zone_type && (
+            <div
+              className="zone-indicator"
+              style={{
+                background: agentDecision.zone_type === 'DEMAND' ? 'rgba(34, 197, 94, 0.15)' : 'rgba(239, 68, 68, 0.15)',
+                border: `1px solid ${agentDecision.zone_type === 'DEMAND' ? '#22c55e' : '#ef4444'}`,
+                borderRadius: '6px',
+                padding: '8px 12px',
+                marginTop: '8px',
+                fontSize: '12px',
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontWeight: 600, color: agentDecision.zone_type === 'DEMAND' ? '#22c55e' : '#ef4444' }}>
+                  {agentDecision.zone_type === 'DEMAND' ? '▲' : '▼'} In {agentDecision.zone_type} Zone
+                </span>
+                <span style={{ color: '#9ca3af' }}>
+                  Q:{agentDecision.zone_quality?.toFixed(0)} | {agentDecision.zone_confirmed ? '✓' : '○'} | {agentDecision.zone_bias > 0 ? '+' : ''}{agentDecision.zone_bias.toFixed(1)}pts
+                </span>
+              </div>
+            </div>
+          )}
 
           {/* Action Card with SL/TP */}
           {agentDecision && (
