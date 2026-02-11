@@ -15,6 +15,10 @@ interface AgentDecision {
   action_reason: string
   stop_loss: number | null
   take_profit: number | null
+  // Scores from /agent endpoint (used for action decision)
+  bias_score: number
+  agent_mode: string
+  confidence: string
 }
 
 interface BiasDetails {
@@ -117,20 +121,20 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
 
       {biasDetails && (
         <>
-          {/* Bias Score Gauge */}
+          {/* Bias Score Gauge - Use decision score (includes zone adjustment) for consistency with action */}
           <div className="bias-gauge">
             <div className="gauge-label">
               <span>Bias Score</span>
               <span
                 className="score-value"
-                style={{ color: getModeColor(biasDetails.mode) }}
+                style={{ color: getModeColor(decision?.agent_mode || biasDetails.mode) }}
               >
-                {biasDetails.total_score.toFixed(1)}
+                {(decision?.bias_score ?? biasDetails.total_score).toFixed(1)}
               </span>
             </div>
             <div
               className="gauge-bar"
-              style={{ background: getScoreGradient(biasDetails.total_score) }}
+              style={{ background: getScoreGradient(decision?.bias_score ?? biasDetails.total_score) }}
             />
             <div className="gauge-labels">
               <span>Bearish</span>
@@ -139,16 +143,16 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
             </div>
           </div>
 
-          {/* Mode & Confidence */}
+          {/* Mode & Confidence - Use decision values for consistency with action */}
           <div className="agent-mode">
             <div
               className="mode-badge"
-              style={{ backgroundColor: getModeColor(biasDetails.mode) }}
+              style={{ backgroundColor: getModeColor(decision?.agent_mode || biasDetails.mode) }}
             >
-              {biasDetails.mode.replace('_', ' ')}
+              {(decision?.agent_mode || biasDetails.mode).replace('_', ' ')}
             </div>
             <div className="confidence-badge">
-              {biasDetails.confidence}
+              {decision?.confidence || biasDetails.confidence}
             </div>
           </div>
 
