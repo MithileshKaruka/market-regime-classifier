@@ -27,6 +27,7 @@ export const API_CONFIG = {
     agentDecision: '/api/orderflow/agent',
     agentBias: '/api/orderflow/agent-bias',
     zones: '/api/v1/zones',
+    keyLevels: '/api/v1/key-levels',
   },
 } as const
 
@@ -142,6 +143,17 @@ export const COLORS = {
     demandBg: 'rgba(34, 197, 94, 0.25)',  // Green with 25% opacity
     supply: '#ef4444',           // Red - supply zone (bearish)
     supplyBg: 'rgba(239, 68, 68, 0.25)',  // Red with 25% opacity
+  },
+
+  // Key Levels colors
+  keyLevels: {
+    yearlyOpen: '#ec4899',       // Pink - YO
+    monthlyOpen: '#8b5cf6',      // Purple - MO
+    weeklyOpen: '#3b82f6',       // Blue - WO
+    mondayHigh: '#22c55e',       // Green - MDAY-H
+    mondayLow: '#ef4444',        // Red - MDAY-L
+    prevWeekHigh: '#f97316',     // Orange - PWH
+    prevWeekLow: '#f97316',      // Orange - PWL
   },
 
   // Agent mode colors

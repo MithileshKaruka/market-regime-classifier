@@ -60,6 +60,14 @@ interface OrderflowSignal {
   details: string
 }
 
+interface KeyLevel {
+  name: string
+  short_name: string
+  price: number
+  timestamp: number
+  color: string
+}
+
 // Zone interface is imported from ZonePrimitive as ZoneData
 
 interface ChartViewProps {
@@ -90,6 +98,9 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
   const [showZones, setShowZones] = useState(false)
   const [zones, setZones] = useState<ZoneData[]>([])
   const zonePrimitivesRef = useRef<ZonePrimitive[]>([])  // Track zone primitives
+  const [showKeyLevels, setShowKeyLevels] = useState(true)
+  const [keyLevels, setKeyLevels] = useState<KeyLevel[]>([])
+  const keyLevelLinesRef = useRef<any[]>([])  // Track key level price lines
   const chartViewRef = useRef<HTMLDivElement>(null)
 
   // Lazy loading state
@@ -530,10 +541,16 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
             candlestickSeriesRef.current?.detachPrimitive(primitive)
           })
           zonePrimitivesRef.current = []
+          // Clear key level lines
+          keyLevelLinesRef.current.forEach(line => {
+            candlestickSeriesRef.current?.removePriceLine(line)
+          })
+          keyLevelLinesRef.current = []
           // Clear state
           setLoadedBars([])
           loadedBarsRef.current = []
           setZones([])
+          setKeyLevels([])
         }
 
         // Always request all indicators so we have the data available for toggling
@@ -541,11 +558,12 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
         const priceRangeParam = priceRangePct !== THRESHOLDS.srRange.default ? `?price_range_pct=${priceRangePct}` : ''
 
         // Fetch ALL data in PARALLEL to prevent visual flash when switching timeframes
-        const [chartResponse, signalsResponse, srResponse, zonesResponse] = await Promise.all([
+        const [chartResponse, signalsResponse, srResponse, zonesResponse, keyLevelsResponse] = await Promise.all([
           fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.chart}/${timeframe}?limit=${CHART_CONFIG.initialLoad}&offset=0&indicators=${allIndicators}`, { signal: controller.signal }),
           fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.orderflowSignals}/${timeframe}?limit=${CHART_CONFIG.signalsLimit}`, { signal: controller.signal }),
           fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.supportResistance}/${timeframe}${priceRangeParam}`, { signal: controller.signal }),
-          fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.zones}/${timeframe}?limit=50`, { signal: controller.signal })
+          fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.zones}/${timeframe}?limit=50`, { signal: controller.signal }),
+          fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.keyLevels}`, { signal: controller.signal })
         ])
         clearTimeout(timeoutId)
 
@@ -574,7 +592,13 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
           zonesData = zonesJson.zones || []
         }
 
-        console.log(`[Chart] Loaded ${bars.length} bars, ${signals.length} signals, S/R: ${srData ? 'yes' : 'no'}, Zones: ${zonesData.length}`)
+        let keyLevelsData: KeyLevel[] = []
+        if (keyLevelsResponse.ok) {
+          const keyLevelsJson = await keyLevelsResponse.json()
+          keyLevelsData = keyLevelsJson.levels || []
+        }
+
+        console.log(`[Chart] Loaded ${bars.length} bars, ${signals.length} signals, S/R: ${srData ? 'yes' : 'no'}, Zones: ${zonesData.length}, KeyLevels: ${keyLevelsData.length}`)
 
         // Check if chart was disposed during fetch
         if (isChartDisposedRef.current) {
@@ -588,12 +612,19 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
         loadedBarsRef.current = bars
         setOrderflowSignals(signals)
         setZones(zonesData)
+        setKeyLevels(keyLevelsData)
 
         // Clear old price lines BEFORE updating chart
         priceLinesRef.current.forEach(line => {
           candlestickSeriesRef.current?.removePriceLine(line)
         })
         priceLinesRef.current = []
+
+        // Clear old key level lines
+        keyLevelLinesRef.current.forEach(line => {
+          candlestickSeriesRef.current?.removePriceLine(line)
+        })
+        keyLevelLinesRef.current = []
 
         // Clear old zone primitives
         zonePrimitivesRef.current.forEach(primitive => {
@@ -683,6 +714,25 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
           console.log(`Total price lines drawn: ${priceLinesRef.current.length}`)
         }
 
+        // Draw Key Levels as price lines
+        if (showKeyLevels && keyLevelsData.length > 0 && chartRef.current && candlestickSeriesRef.current) {
+          console.log('Key Levels received:', keyLevelsData)
+
+          keyLevelsData.forEach((level: KeyLevel) => {
+            const line = candlestickSeriesRef.current?.createPriceLine({
+              price: level.price,
+              color: level.color,
+              lineWidth: 1,
+              lineStyle: 0,  // Solid line for key levels
+              axisLabelVisible: true,
+              title: level.short_name,
+            })
+            if (line) keyLevelLinesRef.current.push(line)
+          })
+
+          console.log(`Key level lines drawn: ${keyLevelLinesRef.current.length}`)
+        }
+
         // Draw Supply/Demand zones as filled rectangles starting from formation time
         // Filter out broken zones - only show UNTESTED and HELD
         if (showZones && zonesData.length > 0 && chartRef.current && candlestickSeriesRef.current) {
@@ -741,6 +791,32 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
       })
     }
   }, [showZones, zones])
+
+  // Redraw key levels when showKeyLevels toggle changes
+  useEffect(() => {
+    if (isChartDisposedRef.current || !candlestickSeriesRef.current || !chartRef.current) return
+
+    // Clear existing key level lines
+    keyLevelLinesRef.current.forEach(line => {
+      candlestickSeriesRef.current?.removePriceLine(line)
+    })
+    keyLevelLinesRef.current = []
+
+    // Redraw if enabled
+    if (showKeyLevels && keyLevels.length > 0) {
+      keyLevels.forEach((level: KeyLevel) => {
+        const line = candlestickSeriesRef.current?.createPriceLine({
+          price: level.price,
+          color: level.color,
+          lineWidth: 1,
+          lineStyle: 0,  // Solid line
+          axisLabelVisible: true,
+          title: level.short_name,
+        })
+        if (line) keyLevelLinesRef.current.push(line)
+      })
+    }
+  }, [showKeyLevels, keyLevels])
 
   const toggleIndicator = (key: string) => {
     const indicator = AVAILABLE_INDICATORS.find(ind => ind.key === key)
@@ -1026,6 +1102,22 @@ export default function ChartView({ timeframe, onTimeframeChange }: ChartViewPro
             title="Toggle Supply/Demand zones"
           >
             Zones ({zones.length})
+          </button>
+          <button
+            onClick={() => setShowKeyLevels(!showKeyLevels)}
+            style={{
+              padding: '4px 12px',
+              borderRadius: '4px',
+              border: showKeyLevels ? `1px solid ${COLORS.border.active}` : `1px solid ${COLORS.border.light}`,
+              background: showKeyLevels ? COLORS.background.buttonHover : COLORS.background.button,
+              color: showKeyLevels ? COLORS.text.white : COLORS.text.secondary,
+              cursor: 'pointer',
+              fontSize: '12px',
+              fontWeight: showKeyLevels ? 600 : 400,
+            }}
+            title="Toggle Key Levels (YO, MO, WO, MDAY, PWH/PWL)"
+          >
+            Key Levels ({keyLevels.length})
           </button>
           <div style={{ position: 'relative' }}>
             <button
