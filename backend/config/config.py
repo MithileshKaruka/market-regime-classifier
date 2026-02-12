@@ -219,12 +219,26 @@ class TakeProfitConfig:
 
 
 @dataclass
+class DynamicLevelsConfig:
+    """Dynamic SL/TP calculation parameters"""
+    enabled: bool = True  # Use market structure vs static percentages
+    swing_window: int = 5  # Bars to look before/after for swing points
+    atr_period: int = 14  # ATR calculation period
+    sl_atr_buffer: float = 0.3  # ATR buffer beyond swing point
+    min_rr_ratio: float = 1.5  # Minimum risk:reward ratio
+    max_rr_ratio: float = 3.0  # Maximum risk:reward ratio (cap)
+    max_sl_pct: float = 1.5  # Maximum SL as percentage (1.5%)
+    min_sl_pct: float = 0.3  # Minimum SL as percentage (0.3%)
+
+
+@dataclass
 class RiskConfig:
     """Risk management parameters"""
     stop_loss_pct: float = 0.5
     take_profit: TakeProfitConfig = field(default_factory=TakeProfitConfig)
     max_position_size: float = 1.0
     scale_in_size: float = 0.5
+    dynamic_levels: DynamicLevelsConfig = field(default_factory=DynamicLevelsConfig)
 
 
 @dataclass

@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Query, Path, HTTPException
 from typing import Optional
 from pydantic import BaseModel
+from datetime import timezone
 import polars as pl
 from app.data.storage import DuckDBStorage
 from app.features.indicators import TechnicalIndicators
@@ -127,7 +128,7 @@ async def get_chart_with_indicators(
         bars = []
         for row in reversed(list(df_merged.iter_rows(named=True))):
             bars.append(ChartBar(
-                time=int(row["timestamp"].timestamp()),
+                time=int(row["timestamp"].replace(tzinfo=timezone.utc).timestamp()),
                 open=row["open"],
                 high=row["high"],
                 low=row["low"],

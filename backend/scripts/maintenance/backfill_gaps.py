@@ -19,6 +19,12 @@ Usage:
 
     # Backfill only MBP-1 data (orderflow only, overlay on existing OHLCV)
     python scripts/maintenance/backfill_gaps.py --backfill --mbp-only
+
+    # Clean and re-download data for a specific date (useful when live ingestion had issues)
+    python scripts/maintenance/backfill_gaps.py --clean --backfill --start 2025-02-11 --end 2025-02-11
+
+    # Just clean data for a date (no re-download)
+    python scripts/maintenance/backfill_gaps.py --clean --start 2025-02-11 --end 2025-02-11
 """
 import sys
 import argparse
@@ -124,13 +130,103 @@ def get_dates_to_backfill(gaps: List[Tuple[datetime, datetime]]) -> List[str]:
     return sorted(dates)
 
 
+def clean_data_for_date(date: str, symbol: str = "MNQ") -> dict:
+    """Clean all data for a specific date
+
+    Removes data from:
+    - ohlcv_ticks (all timeframes)
+    - mbp_ticks
+
+    Args:
+        date: Date string (YYYY-MM-DD)
+        symbol: Symbol to clean
+
+    Returns:
+        Dict with counts of deleted rows per table
+    """
+    print(f"\n  Cleaning data for {date}...")
+
+    # Parse date for timestamp range
+    dt = datetime.strptime(date, '%Y-%m-%d')
+    start_ts = dt
+    end_ts = dt + timedelta(days=1)
+
+    deleted = {}
+
+    with DuckDBStorage() as storage:
+        # Clean ohlcv_ticks
+        try:
+            result = storage.conn.execute(f"""
+                DELETE FROM ohlcv_ticks
+                WHERE symbol = '{symbol}'
+                AND timestamp >= '{start_ts}'
+                AND timestamp < '{end_ts}'
+            """)
+            deleted['ohlcv_ticks'] = result.fetchone()[0] if result else 0
+            print(f"    ohlcv_ticks: {deleted['ohlcv_ticks']:,} rows deleted")
+        except Exception as e:
+            print(f"    ohlcv_ticks: error - {e}")
+            deleted['ohlcv_ticks'] = 0
+
+        # Clean mbp_ticks
+        try:
+            result = storage.conn.execute(f"""
+                DELETE FROM mbp_ticks
+                WHERE symbol = '{symbol}'
+                AND timestamp >= '{start_ts}'
+                AND timestamp < '{end_ts}'
+            """)
+            deleted['mbp_ticks'] = result.fetchone()[0] if result else 0
+            print(f"    mbp_ticks: {deleted['mbp_ticks']:,} rows deleted")
+        except Exception as e:
+            print(f"    mbp_ticks: error - {e}")
+            deleted['mbp_ticks'] = 0
+
+        storage.conn.commit()
+
+    return deleted
+
+
+def clean_date_range(start_date: str, end_date: str, symbol: str = "MNQ"):
+    """Clean data for a date range
+
+    Args:
+        start_date: Start date (YYYY-MM-DD)
+        end_date: End date (YYYY-MM-DD)
+        symbol: Symbol to clean
+    """
+    print(f"\n{'='*60}")
+    print(f"  Cleaning data from {start_date} to {end_date}")
+    print(f"{'='*60}")
+
+    dates = []
+    current = datetime.strptime(start_date, '%Y-%m-%d').date()
+    end = datetime.strptime(end_date, '%Y-%m-%d').date()
+    while current <= end:
+        dates.append(current.strftime('%Y-%m-%d'))
+        current += timedelta(days=1)
+
+    total_deleted = {'ohlcv_ticks': 0, 'mbp_ticks': 0}
+
+    for date in dates:
+        deleted = clean_data_for_date(date, symbol)
+        for table, count in deleted.items():
+            total_deleted[table] += count
+
+    print(f"\n  Total cleaned:")
+    for table, count in total_deleted.items():
+        print(f"    {table}: {count:,} rows")
+
+    return total_deleted
+
+
 def download_from_databento(
     date: str,
     output_dir: Path,
     api_key: str,
     schema: str = "mbp-1",
     dataset: str = "GLBX.MDP3",
-    symbol: str = "MNQ.FUT"
+    symbol: str = "MNQ.c.0"
 ) -> Optional[Path]:
     """Download data from Databento for a specific date
 
@@ -140,7 +236,7 @@ def download_from_databento(
         api_key: Databento API key
         schema: Data schema (mbp-1 or ohlcv-1m)
         dataset: Databento dataset
-        symbol: Symbol to download
+        symbol: Symbol to download (default MNQ.c.0 for continuous front-month)
 
     Returns:
         Path to downloaded file, or None if failed
@@ -158,10 +254,15 @@ def download_from_databento(
 
         output_path = output_dir / f"{schema_name}_{date}.dbn.zst"
 
-        # Download data
+        # Remove existing file if present
+        if output_path.exists():
+            output_path.unlink()
+
+        # Download data using continuous contract symbology
         client.timeseries.get_range(
             dataset=dataset,
             symbols=[symbol],
+            stype_in="continuous",
             schema=schema,
             start=start,
             end=end,
@@ -308,37 +409,62 @@ def main():
     parser = argparse.ArgumentParser(description='Detect and backfill data gaps')
     parser.add_argument('--check', action='store_true', help='Check for gaps only')
     parser.add_argument('--backfill', action='store_true', help='Backfill gaps from Databento')
-    parser.add_argument('--start', type=str, help='Start date for backfill (YYYY-MM-DD)')
-    parser.add_argument('--end', type=str, help='End date for backfill (YYYY-MM-DD)')
+    parser.add_argument('--clean', action='store_true', help='Clean existing data before backfill (requires --start/--end)')
+    parser.add_argument('--start', type=str, help='Start date (YYYY-MM-DD)')
+    parser.add_argument('--end', type=str, help='End date (YYYY-MM-DD)')
     parser.add_argument('--timeframe', type=str, default='1H', help='Timeframe for gap detection')
     parser.add_argument('--ohlcv-only', action='store_true', help='Only download OHLCV data')
     parser.add_argument('--mbp-only', action='store_true', help='Only download MBP-1 data')
+    parser.add_argument('--symbol', type=str, default='MNQ', help='Symbol to process')
 
     args = parser.parse_args()
 
-    if not args.check and not args.backfill:
+    # Validate clean requires date range
+    if args.clean and (not args.start or not args.end):
+        print("[ERROR] --clean requires both --start and --end dates")
+        print("  Example: --clean --start 2025-02-11 --end 2025-02-11")
+        return
+
+    if not args.check and not args.backfill and not args.clean:
         args.check = True  # Default to check
 
     print("=" * 60)
     print("  Gap Detection & Backfill Utility")
     print("=" * 60)
 
-    # Detect gaps
-    gaps = detect_gaps(args.timeframe)
-    print_gaps(gaps)
+    # Clean data if requested
+    if args.clean:
+        clean_date_range(args.start, args.end, args.symbol)
 
     # Backfill if requested
     if args.backfill:
-        backfill_gaps(
-            gaps,
-            args.start,
-            args.end,
-            ohlcv_only=args.ohlcv_only,
-            mbp_only=args.mbp_only
-        )
-    elif gaps:
-        print("\nTo backfill these gaps, run:")
-        print("  python scripts/maintenance/backfill_gaps.py --backfill")
+        if args.start and args.end:
+            # Use specified date range
+            backfill_gaps(
+                [],  # No gaps, using explicit dates
+                args.start,
+                args.end,
+                ohlcv_only=args.ohlcv_only,
+                mbp_only=args.mbp_only
+            )
+        else:
+            # Detect gaps first
+            gaps = detect_gaps(args.timeframe)
+            print_gaps(gaps)
+            backfill_gaps(
+                gaps,
+                args.start,
+                args.end,
+                ohlcv_only=args.ohlcv_only,
+                mbp_only=args.mbp_only
+            )
+    elif args.check:
+        # Just check for gaps
+        gaps = detect_gaps(args.timeframe)
+        print_gaps(gaps)
+        if gaps:
+            print("\nTo backfill these gaps, run:")
+            print("  python scripts/maintenance/backfill_gaps.py --backfill")
 
 
 if __name__ == "__main__":

@@ -121,38 +121,54 @@ def filter_ohlcv_data(df: pl.DataFrame) -> pl.DataFrame:
 def resample_to_timeframe(df: pl.DataFrame, timeframe: str) -> pl.DataFrame:
     """Resample 1-minute OHLCV to higher timeframe
 
-    Uses standard UTC boundaries for all timeframes:
+    Uses standard UTC boundaries for intraday timeframes:
     - 5M: 0, 5, 10, ... minutes
     - 15M: 0, 15, 30, 45 minutes
     - 1H: 0, 1, 2, ... hours
     - 4H: 0, 4, 8, 12, 16, 20 hours
-    - 1D: 0 (midnight UTC)
 
-    Note: Previous version attempted CME session alignment with hour shifts,
-    but this caused misaligned bar timestamps. Standard UTC boundaries are
-    cleaner and work correctly with charting libraries.
+    For 1D, uses CME session boundaries (22:00 UTC = 4pm CT close):
+    - Each trading day runs from previous day 23:00 UTC to current day 22:00 UTC
+    - Bar timestamp is 22:00 UTC of the trade date
+    - This aligns with CME Globex sessions (Sunday 5pm CT to Friday 4pm CT)
     """
-    # Map timeframe to minutes for truncation
-    tf_minutes = {
-        "5M": 5,
-        "15M": 15,
-        "1H": 60,
-        "4H": 240,
-        "1D": 1440,
-    }
+    if timeframe == "1D":
+        # CME trade date convention: session ends at 22:00 UTC
+        # Add 2 hours to shift 22:00->00:00, truncate to day, then set to 22:00 UTC
+        df_resampled = df.with_columns([
+            (pl.col("ts_event") + pl.duration(hours=2)).dt.truncate("1d").alias("bar_time")
+        ]).group_by("bar_time").agg([
+            pl.col("open").first(),
+            pl.col("high").max(),
+            pl.col("low").min(),
+            pl.col("close").last(),
+            pl.col("volume").sum(),
+        ])
 
-    minutes = tf_minutes[timeframe]
+        # Set bar timestamp to 22:00 UTC of that trade date
+        df_resampled = df_resampled.with_columns([
+            (pl.col("bar_time") + pl.duration(hours=22)).alias("ts_event")
+        ]).drop("bar_time").sort("ts_event")
+    else:
+        # Map timeframe to minutes for truncation
+        tf_minutes = {
+            "5M": 5,
+            "15M": 15,
+            "1H": 60,
+            "4H": 240,
+        }
+        minutes = tf_minutes[timeframe]
 
-    # Use truncate for clean UTC boundaries (same approach as reaggregate script)
-    df_resampled = df.with_columns([
-        pl.col("ts_event").dt.truncate(f"{minutes}m").alias("bar_time")
-    ]).group_by("bar_time").agg([
-        pl.col("open").first(),
-        pl.col("high").max(),
-        pl.col("low").min(),
-        pl.col("close").last(),
-        pl.col("volume").sum(),
-    ]).rename({"bar_time": "ts_event"}).sort("ts_event")
+        # Use truncate for clean UTC boundaries
+        df_resampled = df.with_columns([
+            pl.col("ts_event").dt.truncate(f"{minutes}m").alias("bar_time")
+        ]).group_by("bar_time").agg([
+            pl.col("open").first(),
+            pl.col("high").max(),
+            pl.col("low").min(),
+            pl.col("close").last(),
+            pl.col("volume").sum(),
+        ]).rename({"bar_time": "ts_event"}).sort("ts_event")
 
     df_resampled = df_resampled.drop_nulls()
 
@@ -197,10 +213,10 @@ def process_mbp1_to_ticks(df: pl.DataFrame) -> pl.DataFrame:
         (pl.col("ask_px_00") - pl.col("bid_px_00")).alias("spread"),
     ])
 
-    # Calculate delta from size changes
+    # Calculate delta from size changes (cast to Int64 to allow negative values)
     df = df.with_columns([
-        (pl.col("bid_sz_00") - pl.col("bid_sz_00").shift(1)).fill_null(0).alias("bid_change"),
-        (pl.col("ask_sz_00") - pl.col("ask_sz_00").shift(1)).fill_null(0).alias("ask_change"),
+        (pl.col("bid_sz_00").cast(pl.Int64) - pl.col("bid_sz_00").shift(1).cast(pl.Int64)).fill_null(0).alias("bid_change"),
+        (pl.col("ask_sz_00").cast(pl.Int64) - pl.col("ask_sz_00").shift(1).cast(pl.Int64)).fill_null(0).alias("ask_change"),
     ])
 
     # Delta: negative ask change = buy, negative bid change = sell
@@ -208,7 +224,7 @@ def process_mbp1_to_ticks(df: pl.DataFrame) -> pl.DataFrame:
         (
             pl.when(pl.col("ask_change") < 0).then(-pl.col("ask_change")).otherwise(0) -
             pl.when(pl.col("bid_change") < 0).then(-pl.col("bid_change")).otherwise(0)
-        ).cast(pl.Int64).alias("delta")
+        ).alias("delta")
     ])
 
     # Calculate DOM imbalance
@@ -315,7 +331,7 @@ def insert_ohlcv_data(storage, df: pl.DataFrame, timeframe: str, with_orderflow:
 
 def insert_mbp_ticks(storage, df: pl.DataFrame):
     """Insert MBP ticks into mbp_ticks table"""
-    storage.conn.execute("INSERT INTO mbp_ticks SELECT * FROM df")
+    storage.conn.execute("INSERT OR REPLACE INTO mbp_ticks SELECT * FROM df")
 
 
 def aggregate_mbp_to_ohlcv(storage):
@@ -348,12 +364,16 @@ def aggregate_mbp_to_ohlcv(storage):
         cvd_window = CVD_WINDOWS.get(tf, 100)
         print(f"  Processing {tf} (CVD window: {cvd_window} bars)...")
 
-        # Delete existing bars in MBP date range
+        # Delete existing bars ONLY within MBP date range (not everything after!)
         storage.conn.execute(f"""
             DELETE FROM ohlcv_ticks
             WHERE symbol = 'MNQ' AND timeframe = '{tf}'
             AND timestamp >= (
                 SELECT time_bucket(INTERVAL '{interval}', MIN(timestamp))
+                FROM mbp_ticks WHERE symbol = 'MNQ'
+            )
+            AND timestamp <= (
+                SELECT time_bucket(INTERVAL '{interval}', MAX(timestamp))
                 FROM mbp_ticks WHERE symbol = 'MNQ'
             )
         """)

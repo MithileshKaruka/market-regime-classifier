@@ -24,6 +24,7 @@ interface AgentDecision {
   zone_type: string | null  // "DEMAND" or "SUPPLY"
   zone_quality: number | null
   zone_confirmed: boolean | null
+  zone_distance_pct: number | null  // 0 = inside zone, >0 = distance to zone
 }
 
 interface BiasDetails {
@@ -71,7 +72,6 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
   const [showReasoning, setShowReasoning] = useState(false)
 
   const fetchBiasScore = async () => {
-    console.log('[AgentPanel] fetchBiasScore called for timeframe:', timeframe)
     setLoading(true)
     setError(null)
     try {
@@ -83,22 +83,11 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
 
       if (agentRes.ok) {
         const agentData = await agentRes.json()
-        console.log('[AgentPanel] Agent decision response:', {
-          bias_score: agentData.bias_score,
-          agent_mode: agentData.agent_mode,
-          zone_bias: agentData.zone_bias,
-          zone_type: agentData.zone_type,
-          action: agentData.action,
-        })
         setDecision(agentData)
       }
 
       if (!biasRes.ok) throw new Error('Failed to fetch bias score')
       const data = await biasRes.json()
-      console.log('[AgentPanel] Bias details response:', {
-        total_score: data.total_score,
-        mode: data.mode,
-      })
       setBiasDetails(data)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error')
@@ -134,11 +123,6 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
         >
           {loading ? '...' : 'Refresh'}
         </button>
-      </div>
-
-      {/* DEBUG: Remove after testing */}
-      <div style={{ fontSize: '10px', background: '#333', padding: '4px', marginBottom: '8px' }}>
-        DEBUG: decision?.bias_score = {String(decision?.bias_score)} | biasDetails?.total_score = {String(biasDetails?.total_score)}
       </div>
 
       {biasDetails && (
@@ -178,8 +162,8 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
             </div>
           </div>
 
-          {/* Zone Entry Indicator - Shows when price is inside a S/D zone */}
-          {decision?.zone_bias !== null && decision?.zone_bias !== 0 && decision?.zone_type && (
+          {/* Zone Indicator - Shows when price is inside or near a S/D zone */}
+          {decision?.zone_type && decision?.zone_quality !== null && (
             <div
               className="zone-indicator"
               style={{
@@ -193,16 +177,21 @@ export default function AgentPanel({ timeframe }: AgentPanelProps) {
                 alignItems: 'center',
                 justifyContent: 'space-between',
                 gap: '8px',
+                opacity: (decision.zone_bias && decision.zone_bias !== 0) ? 1 : 0.7,  // Slightly faded when near but not inside
               }}
             >
               <span style={{
                 fontWeight: 600,
                 color: decision.zone_type === 'DEMAND' ? COLORS.zones.demand : COLORS.zones.supply
               }}>
-                {decision.zone_type === 'DEMAND' ? '▲' : '▼'} In {decision.zone_type} Zone
+                {decision.zone_type === 'DEMAND' ? '▲' : '▼'} {(decision.zone_bias && decision.zone_bias !== 0) ? 'In' : 'Near'} {decision.zone_type} Zone
               </span>
               <span style={{ color: COLORS.text.secondary }}>
-                Q:{decision.zone_quality?.toFixed(0) || '?'} | {decision.zone_confirmed ? '✓ Confirmed' : 'Unconfirmed'} | {decision.zone_bias > 0 ? '+' : ''}{decision.zone_bias?.toFixed(1)} pts
+                {decision.zone_bias && decision.zone_bias !== 0 ? (
+                  <>Q:{decision.zone_quality?.toFixed(0) || '?'} | {decision.zone_confirmed ? '✓ Confirmed' : 'Unconfirmed'} | {decision.zone_bias > 0 ? '+' : ''}{decision.zone_bias.toFixed(1)} pts</>
+                ) : (
+                  <>Q:{decision.zone_quality?.toFixed(0) || '?'} | {((decision.zone_distance_pct || 0) * 100).toFixed(1)}% away</>
+                )}
               </span>
             </div>
           )}

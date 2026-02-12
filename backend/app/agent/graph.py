@@ -26,6 +26,7 @@ from app.features.agent_bias import AgentBiasCalculator, AgentMode, AgentBiasRes
 from app.features.orderflow_metrics import OrderflowMetricsCalculator
 from app.features.orderflow_signals import OrderflowSignalDetector
 from app.features.zone_bias import ZoneBiasScorer
+from app.features.dynamic_levels import DynamicLevelCalculator
 from app.data.storage import DuckDBStorage
 import polars as pl
 
@@ -83,6 +84,9 @@ class AgentState(TypedDict, total=False):
     zone_type: Optional[str]  # DEMAND or SUPPLY
     zone_quality: Optional[float]
     zone_confirmed: Optional[bool]
+    zone_distance_pct: Optional[float]  # Distance to zone as pct (0 = inside)
+    zone_low: Optional[float]  # Zone lower boundary
+    zone_high: Optional[float]  # Zone upper boundary
 
     # Metadata
     iteration: int
@@ -336,6 +340,9 @@ def evaluate_bias(state: AgentState) -> AgentState:
         "zone_type": zone_bias_result.active_zone.zone_type.value if zone_bias_result.active_zone else None,
         "zone_quality": zone_bias_result.zone_quality,
         "zone_confirmed": zone_bias_result.orderflow_confirmation,
+        "zone_distance_pct": zone_bias_result.distance_to_zone_pct if zone_bias_result.active_zone else None,
+        "zone_low": zone_bias_result.active_zone.price_low if zone_bias_result.active_zone else None,
+        "zone_high": zone_bias_result.active_zone.price_high if zone_bias_result.active_zone else None,
         "messages": [{"role": "assistant", "content": evaluation_msg}],
     }
 
@@ -349,6 +356,10 @@ def decide_action(state: AgentState) -> AgentState:
     - NEUTRAL: Wait, no trades
     - WEAK_BULLISH: Cautious longs at S/R
     - HIGH_BULLISH: Aggressive longs, add to winners
+
+    SL/TP Calculation:
+    - If dynamic_levels.enabled: Use market structure (swing points, zones, ATR)
+    - Otherwise: Use static percentage from config
     """
     from config import get_config
     config = get_config()
@@ -358,10 +369,17 @@ def decide_action(state: AgentState) -> AgentState:
     position = state.get("position", PositionState.FLAT.value)
     current_price = state.get("current_price", 0)
     confidence = state.get("confidence", "LOW")
+    timeframe = state.get("timeframe", "15M")
+
+    # Zone info for dynamic level calculation
+    zone_type = state.get("zone_type")
+    zone_low = state.get("zone_low")
+    zone_high = state.get("zone_high")
 
     # Get risk params from config
     stop_loss_pct = config.risk.stop_loss_pct / 100
     tp_config = config.risk.take_profit
+    dynamic_config = config.risk.dynamic_levels
 
     logger.info(f"[Decide] Mode={agent_mode}, Position={position}, Score={bias_score:.1f}")
 
@@ -369,6 +387,57 @@ def decide_action(state: AgentState) -> AgentState:
     action_reason = ""
     stop_loss = None
     take_profit = None
+    sl_reason = ""
+    tp_reason = ""
+
+    # Helper to calculate dynamic or static levels
+    def calculate_levels(direction: str) -> tuple:
+        """Calculate SL/TP using dynamic or static method."""
+        nonlocal sl_reason, tp_reason
+
+        if dynamic_config.enabled and current_price > 0:
+            try:
+                calculator = DynamicLevelCalculator(
+                    swing_window=dynamic_config.swing_window,
+                    atr_period=dynamic_config.atr_period,
+                    sl_atr_buffer=dynamic_config.sl_atr_buffer,
+                    min_rr_ratio=dynamic_config.min_rr_ratio,
+                    max_rr_ratio=dynamic_config.max_rr_ratio,
+                    max_sl_pct=dynamic_config.max_sl_pct / 100,
+                    min_sl_pct=dynamic_config.min_sl_pct / 100,
+                )
+                # Pass zone boundaries if we're trading from a zone
+                z_low = zone_low if zone_type == "DEMAND" else None
+                z_high = zone_high if zone_type == "SUPPLY" else None
+
+                levels = calculator.calculate_levels(
+                    direction=direction,
+                    timeframe=timeframe,
+                    current_price=current_price,
+                    zone_low=z_low,
+                    zone_high=z_high,
+                )
+                if levels:
+                    sl_reason = levels.sl_reason
+                    tp_reason = f"{levels.tp_reason} (R:R {levels.risk_reward:.1f}:1)"
+                    logger.info(f"[Decide] Dynamic levels: SL={levels.stop_loss:.2f} ({sl_reason}), TP={levels.take_profit:.2f} ({tp_reason})")
+                    return levels.stop_loss, levels.take_profit
+            except Exception as e:
+                logger.warning(f"[Decide] Dynamic level calc failed: {e}, falling back to static")
+
+        # Fallback to static percentages
+        sl_reason = f"Static {stop_loss_pct*100:.1f}%"
+        if direction == "LONG":
+            sl = current_price * (1 - stop_loss_pct)
+            tp_pct = tp_config.high_bullish if agent_mode == AgentMode.HIGH_BULLISH.value else tp_config.weak_bullish
+            tp = current_price * (1 + tp_pct / 100)
+            tp_reason = f"Static {tp_pct:.1f}%"
+        else:  # SHORT
+            sl = current_price * (1 + stop_loss_pct)
+            tp_pct = tp_config.high_bearish if agent_mode == AgentMode.HIGH_BEARISH.value else tp_config.weak_bearish
+            tp = current_price * (1 - tp_pct / 100)
+            tp_reason = f"Static {tp_pct:.1f}%"
+        return sl, tp
 
     # Check if action requires high confidence
     def requires_high_confidence(action_name: str) -> bool:
@@ -386,8 +455,7 @@ def decide_action(state: AgentState) -> AgentState:
             else:
                 action = TradeAction.ENTER_SHORT
                 action_reason = f"HIGH_BEARISH ({bias_score:.0f}) - Enter short"
-                stop_loss = current_price * (1 + stop_loss_pct)
-                take_profit = current_price * (1 - tp_config.high_bearish / 100)
+                stop_loss, take_profit = calculate_levels("SHORT")
         elif position == PositionState.SHORT.value and confidence == "HIGH":
             action = TradeAction.ADD_TO_SHORT
             action_reason = f"HIGH_BEARISH ({bias_score:.0f}) with HIGH confidence - Add to short"
@@ -414,8 +482,7 @@ def decide_action(state: AgentState) -> AgentState:
         elif position == PositionState.FLAT.value and confidence != "LOW":
             action = TradeAction.ENTER_LONG
             action_reason = f"WEAK_BULLISH ({bias_score:.0f}) - Cautious long at S/R"
-            stop_loss = current_price * (1 - stop_loss_pct)
-            take_profit = current_price * (1 + tp_config.weak_bullish / 100)
+            stop_loss, take_profit = calculate_levels("LONG")
         else:
             action = TradeAction.WAIT
             action_reason = f"WEAK_BULLISH - Already positioned or low confidence"
@@ -427,8 +494,7 @@ def decide_action(state: AgentState) -> AgentState:
         elif position == PositionState.FLAT.value:
             action = TradeAction.ENTER_LONG
             action_reason = f"HIGH_BULLISH ({bias_score:.0f}) - Enter long aggressively"
-            stop_loss = current_price * (1 - stop_loss_pct)
-            take_profit = current_price * (1 + tp_config.high_bullish / 100)
+            stop_loss, take_profit = calculate_levels("LONG")
         elif position == PositionState.LONG.value and confidence == "HIGH":
             action = TradeAction.ADD_TO_LONG
             action_reason = f"HIGH_BULLISH ({bias_score:.0f}) with HIGH confidence - Add to long"
@@ -438,7 +504,7 @@ def decide_action(state: AgentState) -> AgentState:
 
     decision_msg = f"Action: {action.value} | Reason: {action_reason}"
     if stop_loss:
-        decision_msg += f" | SL: ${stop_loss:.2f} | TP: ${take_profit:.2f}"
+        decision_msg += f" | SL: ${stop_loss:.2f} ({sl_reason}) | TP: ${take_profit:.2f} ({tp_reason})"
 
     return {
         **state,

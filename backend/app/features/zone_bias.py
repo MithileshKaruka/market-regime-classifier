@@ -144,9 +144,23 @@ class ZoneBiasScorer:
         self,
         timeframe: str,
         symbol: str = "MNQ",
-        limit: int = 500,
+        limit: int = 5000,
     ) -> pl.DataFrame:
-        """Load recent OHLCV data for zone detection."""
+        """Load recent OHLCV data for zone detection.
+
+        Default limit matches zones API to ensure same zones are detected.
+        Higher timeframes need fewer bars (1D=200, 4H=1200, etc.)
+        """
+        # Use timeframe-appropriate limits (match zones API)
+        limits_by_tf = {
+            "5M": 5000,
+            "15M": 5000,
+            "1H": 5000,
+            "4H": 1500,
+            "1D": 300,
+        }
+        effective_limit = limits_by_tf.get(timeframe, limit)
+
         query = f"""
             SELECT
                 timestamp,
@@ -155,7 +169,7 @@ class ZoneBiasScorer:
             FROM ohlcv_ticks
             WHERE symbol = '{symbol}' AND timeframe = '{timeframe}'
             ORDER BY timestamp DESC
-            LIMIT {limit}
+            LIMIT {effective_limit}
         """
         df = self.db.conn.execute(query).pl()
         return df.reverse() if len(df) > 0 else df
