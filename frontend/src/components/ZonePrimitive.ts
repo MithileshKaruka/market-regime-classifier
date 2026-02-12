@@ -142,12 +142,15 @@ export class ZonePrimitive implements ISeriesPrimitive<Time> {
   private _series: ISeriesApi<'Candlestick'>
   private _zone: ZoneData
   private _paneViews: ISeriesPrimitivePaneView[]
+  private _adjustedTime: number  // Cached adjusted timestamp
 
   constructor(chart: IChartApi, series: ISeriesApi<'Candlestick'>, zone: ZoneData) {
     this._chart = chart
     this._series = series
     this._zone = zone
     this._paneViews = [new ZonePaneView(this)]
+    // Pre-calculate adjusted time once (doesn't change)
+    this._adjustedTime = this._adjustToLocal(zone.formed_at)
   }
 
   paneViews(): readonly ISeriesPrimitivePaneView[] {
@@ -156,7 +159,7 @@ export class ZonePrimitive implements ISeriesPrimitive<Time> {
 
   // Adjust UTC timestamp to local time (same as chart bars)
   // Skip for 1D since daily bars stay at midnight UTC
-  private adjustToLocal(utcTimestamp: number): number {
+  private _adjustToLocal(utcTimestamp: number): number {
     if (this._zone.timeframe === '1D') {
       return utcTimestamp
     }
@@ -168,9 +171,8 @@ export class ZonePrimitive implements ISeriesPrimitive<Time> {
   getPoints(): ZonePoints | null {
     const timeScale = this._chart.timeScale()
 
-    // Convert timestamp to chart coordinate (apply same timezone adjustment as chart bars)
-    const adjustedTime = this.adjustToLocal(this._zone.formed_at)
-    const x1 = timeScale.timeToCoordinate(adjustedTime as Time)
+    // Use cached adjusted time
+    const x1 = timeScale.timeToCoordinate(this._adjustedTime as Time)
 
     // Zone timestamp is outside the visible chart range - silently return null
     // This is expected for older zones when chart is zoomed in to recent data
@@ -211,13 +213,9 @@ export class ZonePrimitive implements ISeriesPrimitive<Time> {
     // Called when primitive is detached from the series
   }
 
-  // Required for auto-scale consideration
+  // Return null to prevent zones from affecting auto-scale
+  // This fixes scroll jankiness when zones are enabled - let candles drive the scale
   autoscaleInfo() {
-    return {
-      priceRange: {
-        minValue: this._zone.price_low,
-        maxValue: this._zone.price_high,
-      },
-    }
+    return null
   }
 }
