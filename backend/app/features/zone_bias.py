@@ -606,7 +606,11 @@ class ZoneBiasScorer:
         current_price: float,
         current_bar_idx: int,
     ) -> Tuple[Optional[ActiveZone], float, float]:
-        """Find the nearest active zone to current price.
+        """Find the zone that price is inside, or nearest zone if not inside any.
+
+        PRIORITY: Zones where price is INSIDE always take precedence over nearby zones.
+        This fixes the bug where a higher-quality nearby zone would be selected over
+        a zone that price is actually inside.
 
         Returns:
             Tuple of (zone, effective_quality, distance_pct)
@@ -614,6 +618,24 @@ class ZoneBiasScorer:
         if not zones:
             return None, 0.0, float('inf')
 
+        # FIRST: Check for zones where price is INSIDE
+        inside_zones = []
+        for zone in zones:
+            if zone.price_low <= current_price <= zone.price_high:
+                bars_age = current_bar_idx - zone.formed_bar_idx
+                quality = zone.effective_quality(bars_age)
+                if quality >= self.min_quality:
+                    inside_zones.append((zone, quality))
+
+        # If price is inside one or more zones, pick highest quality
+        if inside_zones:
+            inside_zones.sort(key=lambda x: x[1], reverse=True)
+            best_zone, best_quality = inside_zones[0]
+            logger.debug(f"Price {current_price} is INSIDE {best_zone.zone_type.value} zone "
+                        f"({best_zone.price_low:.2f}-{best_zone.price_high:.2f}), Q={best_quality:.0f}")
+            return best_zone, best_quality, 0.0
+
+        # SECOND: Price is not inside any zone - find nearest
         best_zone = None
         best_quality = 0.0
         best_distance = float('inf')
@@ -625,7 +647,7 @@ class ZoneBiasScorer:
             elif current_price < zone.price_low:
                 distance = (zone.price_low - current_price) / current_price
             else:
-                distance = 0.0  # Inside zone
+                continue  # Already handled above
 
             # Only consider zones within buffer
             if distance > self.entry_buffer_pct * 3:  # 3x buffer for consideration
