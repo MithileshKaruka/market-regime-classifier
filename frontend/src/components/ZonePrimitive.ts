@@ -59,13 +59,15 @@ class ZonePaneRenderer implements ISeriesPrimitivePaneRenderer {
 
       if (width <= 0 || height <= 0) return
 
+      // Save canvas state to prevent affecting other chart rendering
+      ctx.save()
+
       // Zone styling based on status
       const isHeld = status === 'HELD'
       const isBroken = status === 'BROKEN'
       const isReclaimed = status === 'RECLAIMED'
 
       // Broken zones are very faded, held/reclaimed zones are stronger, untested in between
-      // Reclaimed = was broken but price came back, now acting as zone again
       let fillColor: string
       if (isBroken) {
         fillColor = isDemand
@@ -94,7 +96,7 @@ class ZonePaneRenderer implements ISeriesPrimitivePaneRenderer {
         ctx.setLineDash([4, 4])
         ctx.globalAlpha = 0.3
       } else if (isReclaimed) {
-        ctx.setLineDash([2, 2])  // Shorter dash for reclaimed
+        ctx.setLineDash([2, 2])
         ctx.globalAlpha = 0.7
       } else {
         ctx.globalAlpha = 0.6
@@ -114,9 +116,8 @@ class ZonePaneRenderer implements ISeriesPrimitivePaneRenderer {
       ctx.lineTo(left, bottom)
       ctx.stroke()
 
-      // Reset line dash and alpha
-      ctx.setLineDash([])
-      ctx.globalAlpha = 1.0
+      // Restore canvas state
+      ctx.restore()
     })
   }
 }
