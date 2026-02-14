@@ -721,10 +721,18 @@ Examples:
             ):
                 raise Exception("Trades download/load failed")
 
-            # Step 7: Print summary
+            # Step 7: Re-aggregate 4H and 1D bars to CME session boundaries
+            # (preload uses UTC boundaries, this fixes to CME session start: 23:00 UTC)
+            print("\n" + "=" * 60)
+            print("  Re-aggregating 4H/1D to CME Session Boundaries")
+            print("=" * 60)
+            from scripts.maintenance.reaggregate_timeframes import main as reaggregate_main
+            reaggregate_main()
+
+            # Step 8: Print summary
             print_summary()
 
-            # Step 8: Verify data integrity
+            # Step 9: Verify data integrity
             if not verify_data_loaded():
                 raise Exception("Data verification failed - minimum bar counts not met")
 
@@ -747,7 +755,7 @@ Examples:
 
             return 1
 
-        # Step 9: Clean up backup only if reload was successful (and not --keep-backup)
+        # Step 10: Clean up backup only if reload was successful (and not --keep-backup)
         if reload_success and backup_path and not args.keep_backup:
             cleanup_backup(backup_path)
             cleanup_old_backups(keep_count=2)  # Keep last 2 backups as safety
