@@ -432,7 +432,7 @@ def download_and_load_trades(api_key: str, start: str, end: str):
             api_key,
             start,
             end,
-            hours_per_chunk=2  # 2-hour chunks to avoid OOM on high-volume days
+            hours_per_chunk=1  # 1-hour chunks for peak volume periods (2h caused OOM)
         )
         return True
     except Exception as e:
