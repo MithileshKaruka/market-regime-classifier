@@ -28,6 +28,7 @@ Usage:
 """
 import sys
 import argparse
+import shutil
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Tuple, Optional
@@ -38,6 +39,62 @@ import databento as db
 import polars as pl
 from app.data.storage import DuckDBStorage
 from config import get_secrets, get_config
+
+# Database paths
+DB_PATH = Path(__file__).parent.parent.parent / "data" / "market_data.duckdb"
+BACKUP_DIR = Path(__file__).parent.parent.parent / "data" / "backups"
+
+
+def backup_database() -> Path | None:
+    """Create a backup of the current database before destructive operations.
+
+    Returns:
+        Path to backup file, or None if no database exists
+    """
+    print("\n" + "=" * 60)
+    print("  Creating Database Backup")
+    print("=" * 60)
+
+    # Find the actual database file (may be in different locations)
+    possible_paths = [
+        DB_PATH,
+        Path("/app/data/market_data.duckdb"),  # Docker container path
+    ]
+
+    db_file = None
+    for path in possible_paths:
+        if path.exists():
+            db_file = path
+            break
+
+    if not db_file:
+        print("  No existing database found - skipping backup")
+        return None
+
+    # Create backup directory
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Create timestamped backup
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    backup_path = BACKUP_DIR / f"market_data_backup_{timestamp}.duckdb"
+
+    try:
+        size_mb = db_file.stat().st_size / 1024 / 1024
+        print(f"  Source: {db_file} ({size_mb:.1f} MB)")
+
+        shutil.copy2(db_file, backup_path)
+
+        if backup_path.exists():
+            backup_size = backup_path.stat().st_size / 1024 / 1024
+            print(f"  Backup created: {backup_path.name} ({backup_size:.1f} MB)")
+            return backup_path
+        else:
+            print("  ERROR: Backup file was not created")
+            return None
+    except Exception as e:
+        print(f"  ERROR: Failed to create backup: {e}")
+        return None
+
 
 # Expected gaps (CME closed times - weekends, holidays)
 # CME Globex is open Sunday 5pm CT - Friday 4pm CT
@@ -430,6 +487,7 @@ def main():
     parser.add_argument('--ohlcv-only', action='store_true', help='Only download OHLCV data')
     parser.add_argument('--mbp-only', action='store_true', help='Only download MBP-1 data')
     parser.add_argument('--symbol', type=str, default='MNQ', help='Symbol to process')
+    parser.add_argument('--no-backup', action='store_true', help='Skip database backup (not recommended)')
 
     args = parser.parse_args()
 
@@ -445,6 +503,14 @@ def main():
     print("=" * 60)
     print("  Gap Detection & Backfill Utility")
     print("=" * 60)
+
+    # Create backup before destructive operations
+    backup_path = None
+    if (args.clean or args.backfill) and not args.no_backup:
+        backup_path = backup_database()
+        if backup_path:
+            print(f"\n  Restore command if needed:")
+            print(f"    cp {backup_path} {DB_PATH}")
 
     # Clean data if requested
     if args.clean:
