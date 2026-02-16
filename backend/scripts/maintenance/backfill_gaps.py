@@ -398,11 +398,12 @@ def backfill_gaps(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     ohlcv_only: bool = False,
-    mbp_only: bool = False
+    mbp_only: bool = False,
+    trades_only: bool = False
 ):
     """Backfill gaps from Databento
 
-    Downloads both OHLCV-1M (for price/volume) and MBP-1 (for orderflow metrics).
+    Downloads OHLCV-1M (price/volume), MBP-1 (orderflow), and trades (trade flow metrics).
 
     Args:
         gaps: List of detected gaps
@@ -410,6 +411,7 @@ def backfill_gaps(
         end_date: Optional end date override
         ohlcv_only: Only download OHLCV data
         mbp_only: Only download MBP data
+        trades_only: Only download trades data
     """
     # Get API key
     try:
@@ -446,33 +448,50 @@ def backfill_gaps(
         print(f"\n--- Processing {date} ---")
 
         # Step 1: Download and load OHLCV (price + volume)
-        if not mbp_only:
+        if not mbp_only and not trades_only:
             ohlcv_path = download_from_databento(date, output_dir, api_key, schema="ohlcv-1m")
             if ohlcv_path:
                 load_ohlcv_file(ohlcv_path)
 
         # Step 2: Download and load MBP-1 (orderflow metrics) - chunked to avoid OOM
-        if not ohlcv_only:
+        if not ohlcv_only and not trades_only:
             print(f"  Downloading MBP-1 for {date} (chunked)...")
             try:
                 from scripts.data.preload_historical import download_and_load_mbp_chunked
                 dt = datetime.strptime(date, '%Y-%m-%d')
-                start_date = dt.strftime('%Y-%m-%d')
-                end_date = (dt + timedelta(days=1)).strftime('%Y-%m-%d')
+                chunk_start = dt.strftime('%Y-%m-%d')
+                chunk_end = (dt + timedelta(days=1)).strftime('%Y-%m-%d')
                 download_and_load_mbp_chunked(
                     api_key,
-                    start_date,
-                    end_date,
+                    chunk_start,
+                    chunk_end,
                     hours_per_chunk=1  # 1-hour chunks to avoid OOM on high-volume periods
                 )
             except Exception as e:
                 print(f"    Error downloading MBP-1: {e}")
 
-    # Step 3: Re-aggregate 4H and 1D bars to CME session boundaries
+        # Step 3: Download and load trades (trade flow metrics) - chunked to avoid OOM
+        if not ohlcv_only and not mbp_only:
+            print(f"  Downloading trades for {date} (chunked)...")
+            try:
+                from scripts.data.preload_historical import download_and_load_trades_chunked
+                dt = datetime.strptime(date, '%Y-%m-%d')
+                chunk_start = dt.strftime('%Y-%m-%d')
+                chunk_end = (dt + timedelta(days=1)).strftime('%Y-%m-%d')
+                download_and_load_trades_chunked(
+                    api_key,
+                    chunk_start,
+                    chunk_end,
+                    hours_per_chunk=1  # 1-hour chunks to avoid OOM on high-volume periods
+                )
+            except Exception as e:
+                print(f"    Error downloading trades: {e}")
+
+    # Step 4: Re-aggregate 4H and 1D bars to CME session boundaries
     # (OHLCV loading uses UTC boundaries, this fixes to CME session start: 23:00 UTC)
     # Note: We call reaggregate_timeframe() directly instead of main() because
     # main() uses argparse which would conflict with this script's arguments
-    if not mbp_only:
+    if not mbp_only and not trades_only:
         print("\n  Re-aggregating 4H/1D to CME session boundaries...")
         try:
             from scripts.maintenance.reaggregate_timeframes import reaggregate_timeframe
@@ -497,6 +516,7 @@ def main():
     parser.add_argument('--timeframe', type=str, default='1H', help='Timeframe for gap detection')
     parser.add_argument('--ohlcv-only', action='store_true', help='Only download OHLCV data')
     parser.add_argument('--mbp-only', action='store_true', help='Only download MBP-1 data')
+    parser.add_argument('--trades-only', action='store_true', help='Only download trades data')
     parser.add_argument('--symbol', type=str, default='MNQ', help='Symbol to process')
     parser.add_argument('--no-backup', action='store_true', help='Skip database backup (not recommended)')
 
@@ -536,7 +556,8 @@ def main():
                 args.start,
                 args.end,
                 ohlcv_only=args.ohlcv_only,
-                mbp_only=args.mbp_only
+                mbp_only=args.mbp_only,
+                trades_only=args.trades_only
             )
         else:
             # Detect gaps first
@@ -547,7 +568,8 @@ def main():
                 args.start,
                 args.end,
                 ohlcv_only=args.ohlcv_only,
-                mbp_only=args.mbp_only
+                mbp_only=args.mbp_only,
+                trades_only=args.trades_only
             )
     elif args.check:
         # Just check for gaps
