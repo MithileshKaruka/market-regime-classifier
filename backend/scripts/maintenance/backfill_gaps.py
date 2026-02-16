@@ -402,11 +402,15 @@ def backfill_gaps(
 
     # Step 3: Re-aggregate 4H and 1D bars to CME session boundaries
     # (OHLCV loading uses UTC boundaries, this fixes to CME session start: 23:00 UTC)
+    # Note: We call reaggregate_timeframe() directly instead of main() because
+    # main() uses argparse which would conflict with this script's arguments
     if not mbp_only:
         print("\n  Re-aggregating 4H/1D to CME session boundaries...")
         try:
-            from scripts.maintenance.reaggregate_timeframes import main as reaggregate_main
-            reaggregate_main()
+            from scripts.maintenance.reaggregate_timeframes import reaggregate_timeframe
+            reaggregate_timeframe('5M', '4H')
+            reaggregate_timeframe('5M', '1D')
+            print("  Reaggregation complete.")
         except Exception as e:
             print(f"  Warning: Reaggregation failed: {e}")
 
