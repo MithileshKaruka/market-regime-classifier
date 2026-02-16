@@ -393,6 +393,285 @@ def load_mbp_file(file_path: Path):
         storage.conn.commit()
 
 
+def update_orderflow_from_mbp(api_key: str, date: str, hours_per_chunk: int = 1):
+    """Download MBP data and UPDATE orderflow columns on existing OHLCV bars.
+
+    Unlike download_and_load_mbp_chunked which does INSERT OR REPLACE (overwrites entire row),
+    this function only UPDATES the orderflow columns: instant_delta, dom_imbalance,
+    total_bid_depth, total_ask_depth, cvd.
+
+    Args:
+        api_key: Databento API key
+        date: Date string YYYY-MM-DD
+        hours_per_chunk: Hours per chunk (default 1)
+    """
+    import polars as pl
+    import gc
+
+    dt = datetime.strptime(date, '%Y-%m-%d')
+    start_dt = dt
+    end_dt = dt + timedelta(days=1)
+
+    print(f"\n  Updating orderflow from MBP-1 for {date}...")
+    print(f"    Chunk size: {hours_per_chunk} hours")
+
+    timeframes = {
+        "5M": "5m",
+        "15M": "15m",
+        "1H": "1h",
+        "4H": "4h",
+        "1D": "1d",
+    }
+
+    client = db.Historical(api_key)
+    total_updates = 0
+    chunk_num = 0
+    current = start_dt
+
+    with DuckDBStorage() as storage:
+        while current < end_dt:
+            chunk_num += 1
+            chunk_end = min(current + timedelta(hours=hours_per_chunk), end_dt)
+
+            print(f"    Chunk {chunk_num}: {current.strftime('%H:%M')} to {chunk_end.strftime('%H:%M')}...", end=" ")
+
+            try:
+                data = client.timeseries.get_range(
+                    dataset="GLBX.MDP3",
+                    symbols=["MNQ.c.0"],
+                    stype_in="continuous",
+                    schema="mbp-1",
+                    start=current.strftime('%Y-%m-%dT%H:%M:%S'),
+                    end=chunk_end.strftime('%Y-%m-%dT%H:%M:%S'),
+                )
+
+                df = data.to_df()
+                if len(df) == 0:
+                    print("no data")
+                    current = chunk_end
+                    continue
+
+                if hasattr(df, 'index'):
+                    df = df.reset_index()
+
+                print(f"{len(df):,} records", end="")
+
+                # Convert to polars
+                df_pl = pl.from_pandas(df)
+
+                # Process MBP data to get orderflow metrics
+                df_pl = df_pl.with_columns([
+                    pl.col("bid_sz_00").cast(pl.Int64),
+                    pl.col("ask_sz_00").cast(pl.Int64),
+                ])
+
+                df_pl = df_pl.with_columns([
+                    ((pl.col("bid_px_00") + pl.col("ask_px_00")) / 2).alias("mid_price"),
+                    (pl.col("ask_px_00") - pl.col("bid_px_00")).alias("spread"),
+                ])
+
+                # Filter bad quotes
+                df_pl = df_pl.filter(
+                    (pl.col("spread") / pl.col("mid_price") < 0.005) &
+                    (pl.col("mid_price") > 10000) &
+                    (pl.col("mid_price") < 50000) &
+                    (pl.col("bid_px_00") > 0) &
+                    (pl.col("ask_px_00") > 0)
+                )
+
+                # Calculate delta
+                df_pl = df_pl.with_columns([
+                    (pl.col("bid_sz_00") - pl.col("bid_sz_00").shift(1)).fill_null(0).alias("bid_change"),
+                    (pl.col("ask_sz_00") - pl.col("ask_sz_00").shift(1)).fill_null(0).alias("ask_change"),
+                ])
+
+                df_pl = df_pl.with_columns([
+                    (
+                        pl.when(pl.col("ask_change") < 0).then(-pl.col("ask_change")).otherwise(0) -
+                        pl.when(pl.col("bid_change") < 0).then(-pl.col("bid_change")).otherwise(0)
+                    ).alias("delta")
+                ])
+
+                df_pl = df_pl.with_columns([
+                    ((pl.col("bid_sz_00") - pl.col("ask_sz_00")) /
+                     (pl.col("bid_sz_00") + pl.col("ask_sz_00") + 1)).alias("dom_imbalance")
+                ])
+
+                # Aggregate and UPDATE for each timeframe
+                chunk_updates = 0
+                for tf, duration in timeframes.items():
+                    df_agg = df_pl.group_by_dynamic(
+                        "ts_event", every=duration, closed="left", label="left"
+                    ).agg([
+                        pl.col("delta").sum().alias("instant_delta"),
+                        pl.col("dom_imbalance").mean().alias("dom_imbalance"),
+                        pl.col("bid_sz_00").mean().cast(pl.Float64).alias("total_bid_depth"),
+                        pl.col("ask_sz_00").mean().cast(pl.Float64).alias("total_ask_depth"),
+                    ])
+
+                    # Update existing bars
+                    for row in df_agg.to_dicts():
+                        ts = row['ts_event']
+                        storage.conn.execute("""
+                            UPDATE ohlcv_ticks
+                            SET instant_delta = ?,
+                                dom_imbalance = ?,
+                                total_bid_depth = ?,
+                                total_ask_depth = ?
+                            WHERE timestamp = ? AND timeframe = ? AND symbol = 'MNQ'
+                        """, [
+                            row['instant_delta'],
+                            row['dom_imbalance'],
+                            row['total_bid_depth'],
+                            row['total_ask_depth'],
+                            ts,
+                            tf
+                        ])
+                        chunk_updates += 1
+
+                storage.conn.commit()
+                total_updates += chunk_updates
+                print(f" -> {chunk_updates} updates")
+
+                del df, df_pl, data
+                gc.collect()
+
+            except Exception as e:
+                if "No data found" in str(e):
+                    print("no data")
+                else:
+                    print(f"error: {e}")
+
+            current = chunk_end
+
+        print(f"    Total orderflow updates: {total_updates}")
+
+
+def update_tradeflow_from_trades(api_key: str, date: str, hours_per_chunk: int = 1):
+    """Download trades data and UPDATE trade flow columns on existing OHLCV bars.
+
+    Updates: trade_flow_ratio, buy_trades, sell_trades, large_trade_count
+
+    Args:
+        api_key: Databento API key
+        date: Date string YYYY-MM-DD
+        hours_per_chunk: Hours per chunk (default 1)
+    """
+    import polars as pl
+    import gc
+
+    dt = datetime.strptime(date, '%Y-%m-%d')
+    start_dt = dt
+    end_dt = dt + timedelta(days=1)
+
+    print(f"\n  Updating trade flow from trades for {date}...")
+    print(f"    Chunk size: {hours_per_chunk} hours")
+
+    timeframes = {
+        "5M": "5m",
+        "15M": "15m",
+        "1H": "1h",
+        "4H": "4h",
+        "1D": "1d",
+    }
+
+    client = db.Historical(api_key)
+    total_updates = 0
+    chunk_num = 0
+    current = start_dt
+
+    with DuckDBStorage() as storage:
+        while current < end_dt:
+            chunk_num += 1
+            chunk_end = min(current + timedelta(hours=hours_per_chunk), end_dt)
+
+            print(f"    Chunk {chunk_num}: {current.strftime('%H:%M')} to {chunk_end.strftime('%H:%M')}...", end=" ")
+
+            try:
+                data = client.timeseries.get_range(
+                    dataset="GLBX.MDP3",
+                    symbols=["MNQ.c.0"],
+                    stype_in="continuous",
+                    schema="trades",
+                    start=current.strftime('%Y-%m-%dT%H:%M:%S'),
+                    end=chunk_end.strftime('%Y-%m-%dT%H:%M:%S'),
+                )
+
+                df = data.to_df()
+                if len(df) == 0:
+                    print("no data")
+                    current = chunk_end
+                    continue
+
+                if hasattr(df, 'index'):
+                    df = df.reset_index()
+
+                print(f"{len(df):,} trades", end="")
+
+                # Convert to polars
+                df_pl = pl.from_pandas(df)
+
+                # Determine trade side from aggressor side
+                df_pl = df_pl.with_columns([
+                    pl.when(pl.col("side") == "A").then(1).otherwise(0).alias("is_buy"),
+                    pl.when(pl.col("side") == "B").then(1).otherwise(0).alias("is_sell"),
+                    pl.when(pl.col("size") >= 50).then(1).otherwise(0).alias("is_large"),
+                ])
+
+                # Aggregate and UPDATE for each timeframe
+                chunk_updates = 0
+                for tf, duration in timeframes.items():
+                    df_agg = df_pl.group_by_dynamic(
+                        "ts_event", every=duration, closed="left", label="left"
+                    ).agg([
+                        pl.col("is_buy").sum().alias("buy_trades"),
+                        pl.col("is_sell").sum().alias("sell_trades"),
+                        pl.col("is_large").sum().alias("large_trade_count"),
+                    ])
+
+                    # Calculate trade flow ratio
+                    df_agg = df_agg.with_columns([
+                        (pl.col("buy_trades") / (pl.col("buy_trades") + pl.col("sell_trades") + 1)).alias("trade_flow_ratio")
+                    ])
+
+                    # Update existing bars
+                    for row in df_agg.to_dicts():
+                        ts = row['ts_event']
+                        storage.conn.execute("""
+                            UPDATE ohlcv_ticks
+                            SET trade_flow_ratio = ?,
+                                buy_trades = ?,
+                                sell_trades = ?,
+                                large_trade_count = ?
+                            WHERE timestamp = ? AND timeframe = ? AND symbol = 'MNQ'
+                        """, [
+                            row['trade_flow_ratio'],
+                            row['buy_trades'],
+                            row['sell_trades'],
+                            row['large_trade_count'],
+                            ts,
+                            tf
+                        ])
+                        chunk_updates += 1
+
+                storage.conn.commit()
+                total_updates += chunk_updates
+                print(f" -> {chunk_updates} updates")
+
+                del df, df_pl, data
+                gc.collect()
+
+            except Exception as e:
+                if "No data found" in str(e):
+                    print("no data")
+                else:
+                    print(f"error: {e}")
+
+            current = chunk_end
+
+        print(f"    Total trade flow updates: {total_updates}")
+
+
 def backfill_gaps(
     gaps: List[Tuple[datetime, datetime]],
     start_date: Optional[str] = None,
@@ -453,39 +732,19 @@ def backfill_gaps(
             if ohlcv_path:
                 load_ohlcv_file(ohlcv_path)
 
-        # Step 2: Download and load MBP-1 (orderflow metrics) - chunked to avoid OOM
+        # Step 2: Update orderflow from MBP-1 (uses UPDATE, not INSERT OR REPLACE)
         if not ohlcv_only and not trades_only:
-            print(f"  Downloading MBP-1 for {date} (chunked)...")
             try:
-                from scripts.data.preload_historical import download_and_load_mbp_chunked
-                dt = datetime.strptime(date, '%Y-%m-%d')
-                chunk_start = dt.strftime('%Y-%m-%d')
-                chunk_end = (dt + timedelta(days=1)).strftime('%Y-%m-%d')
-                download_and_load_mbp_chunked(
-                    api_key,
-                    chunk_start,
-                    chunk_end,
-                    hours_per_chunk=1  # 1-hour chunks to avoid OOM on high-volume periods
-                )
+                update_orderflow_from_mbp(api_key, date, hours_per_chunk=1)
             except Exception as e:
-                print(f"    Error downloading MBP-1: {e}")
+                print(f"    Error updating orderflow: {e}")
 
-        # Step 3: Download and load trades (trade flow metrics) - chunked to avoid OOM
+        # Step 3: Update trade flow from trades (uses UPDATE, not INSERT OR REPLACE)
         if not ohlcv_only and not mbp_only:
-            print(f"  Downloading trades for {date} (chunked)...")
             try:
-                from scripts.data.preload_historical import download_and_load_trades_chunked
-                dt = datetime.strptime(date, '%Y-%m-%d')
-                chunk_start = dt.strftime('%Y-%m-%d')
-                chunk_end = (dt + timedelta(days=1)).strftime('%Y-%m-%d')
-                download_and_load_trades_chunked(
-                    api_key,
-                    chunk_start,
-                    chunk_end,
-                    hours_per_chunk=1  # 1-hour chunks to avoid OOM on high-volume periods
-                )
+                update_tradeflow_from_trades(api_key, date, hours_per_chunk=1)
             except Exception as e:
-                print(f"    Error downloading trades: {e}")
+                print(f"    Error updating trade flow: {e}")
 
     # Step 4: Re-aggregate 4H and 1D bars to CME session boundaries
     # (OHLCV loading uses UTC boundaries, this fixes to CME session start: 23:00 UTC)
