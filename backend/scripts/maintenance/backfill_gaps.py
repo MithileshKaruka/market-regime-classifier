@@ -451,11 +451,22 @@ def backfill_gaps(
             if ohlcv_path:
                 load_ohlcv_file(ohlcv_path)
 
-        # Step 2: Download and load MBP-1 (orderflow metrics)
+        # Step 2: Download and load MBP-1 (orderflow metrics) - chunked to avoid OOM
         if not ohlcv_only:
-            mbp_path = download_from_databento(date, output_dir, api_key, schema="mbp-1")
-            if mbp_path:
-                load_mbp_file(mbp_path)
+            print(f"  Downloading MBP-1 for {date} (chunked)...")
+            try:
+                from scripts.data.preload_historical import download_and_load_mbp_chunked
+                dt = datetime.strptime(date, '%Y-%m-%d')
+                start = dt.strftime('%Y-%m-%dT00:00:00')
+                end = (dt + timedelta(days=1)).strftime('%Y-%m-%dT00:00:00')
+                download_and_load_mbp_chunked(
+                    api_key,
+                    start,
+                    end,
+                    hours_per_chunk=1  # 1-hour chunks to avoid OOM on high-volume periods
+                )
+            except Exception as e:
+                print(f"    Error downloading MBP-1: {e}")
 
     # Step 3: Re-aggregate 4H and 1D bars to CME session boundaries
     # (OHLCV loading uses UTC boundaries, this fixes to CME session start: 23:00 UTC)
