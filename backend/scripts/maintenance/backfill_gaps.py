@@ -457,12 +457,12 @@ def backfill_gaps(
             try:
                 from scripts.data.preload_historical import download_and_load_mbp_chunked
                 dt = datetime.strptime(date, '%Y-%m-%d')
-                start = dt.strftime('%Y-%m-%dT00:00:00')
-                end = (dt + timedelta(days=1)).strftime('%Y-%m-%dT00:00:00')
+                start_date = dt.strftime('%Y-%m-%d')
+                end_date = (dt + timedelta(days=1)).strftime('%Y-%m-%d')
                 download_and_load_mbp_chunked(
                     api_key,
-                    start,
-                    end,
+                    start_date,
+                    end_date,
                     hours_per_chunk=1  # 1-hour chunks to avoid OOM on high-volume periods
                 )
             except Exception as e:
