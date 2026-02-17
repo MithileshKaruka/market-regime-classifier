@@ -600,6 +600,65 @@ class ZoneBiasScorer:
             filter_recent(delta_unwind),
         )
 
+    def _filter_broken_zones(
+        self,
+        zones: List[ActiveZone],
+        df: pl.DataFrame,
+        break_pct: float = 0.002,
+    ) -> List[ActiveZone]:
+        """Filter out zones that have been broken by price action.
+
+        A zone is broken when:
+        - Demand zone: price CLOSES below zone low by break_pct
+        - Supply zone: price CLOSES above zone high by break_pct
+
+        Args:
+            zones: List of detected zones
+            df: Price data DataFrame
+            break_pct: Percentage threshold for zone break (default 0.2%)
+
+        Returns:
+            List of zones that are still valid (not broken)
+        """
+        if not zones:
+            return zones
+
+        rows = df.to_dicts()
+        valid_zones = []
+
+        for zone in zones:
+            formed_idx = zone.formed_bar_idx
+
+            # Break threshold based on zone price
+            if zone.zone_type == ZoneType.SUPPLY:
+                break_threshold = zone.price_high * break_pct
+            else:
+                break_threshold = zone.price_low * break_pct
+
+            # Check if zone was broken after formation
+            is_broken = False
+            for i in range(formed_idx + 1, len(rows)):
+                bar_close = rows[i]["close"]
+
+                if zone.zone_type == ZoneType.DEMAND:
+                    # Demand broken if close is below zone low - threshold
+                    if bar_close < zone.price_low - break_threshold:
+                        is_broken = True
+                        break
+                else:  # SUPPLY
+                    # Supply broken if close is above zone high + threshold
+                    if bar_close > zone.price_high + break_threshold:
+                        is_broken = True
+                        break
+
+            if not is_broken:
+                valid_zones.append(zone)
+            else:
+                logger.debug(f"Filtered broken {zone.zone_type.value} zone at {zone.price_low:.2f}-{zone.price_high:.2f}")
+
+        logger.debug(f"Filtered {len(zones) - len(valid_zones)} broken zones, {len(valid_zones)} remain")
+        return valid_zones
+
     def find_nearest_zone(
         self,
         zones: List[ActiveZone],
@@ -707,6 +766,9 @@ class ZoneBiasScorer:
                 current_bar_idx = len(df_zone) - 1
 
             zones = self.detect_active_zones(df_zone, timeframe, current_bar_idx)
+
+            # Filter out broken zones
+            zones = self._filter_broken_zones(zones, df_zone)
         else:
             if current_bar_idx is None:
                 current_bar_idx = 100  # Default
